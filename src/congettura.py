@@ -323,7 +323,6 @@ def test_powers():
         except KeyboardInterrupt:
             log("INFO", "Test cancelled by user", Fore.YELLOW)
             return
-    # Rimosso il prompt per la finestra di avanzamento: si usa sempre collatz_fast senza GUI
     verify_conditions = False
     if base == 2:
         try:
@@ -364,8 +363,8 @@ def test_powers():
         n_orig = base ** i
         t0 = time.perf_counter()
         try:
-            # Sempre collatz_fast, senza ProgressWindow
-            steps, even, odd, final, peak = collatz_fast(n_orig, verbose=False)
+            # Utilizzo di collatz_superfast per maggiore efficienza
+            steps, even, odd, final, peak = collatz_superfast(n_orig)
         except KeyboardInterrupt:
             log("INFO", "Test interrupted by user", Fore.YELLOW)
             break
@@ -512,9 +511,17 @@ def manual_mode():
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
 
 def negative_mode():
-    try: x = read_integer(Fore.CYAN + "Enter an integer (negative allowed): " + Style.RESET_ALL)
-    except KeyboardInterrupt: return
-    if x == 0: log("ERROR", "0 is not valid for negative Collatz", Fore.RED); return
+    try:
+        x = read_integer(Fore.CYAN + "Enter an integer (negative allowed, positive will be negated): " + Style.RESET_ALL)
+    except KeyboardInterrupt:
+        return
+    if x == 0:
+        log("ERROR", "0 is not valid for negative Collatz", Fore.RED)
+        return
+    # Se l'utente inserisce un numero positivo, lo trasformiamo automaticamente in negativo
+    if x > 0:
+        x = -x
+        log("INFO", f"Positive input detected. Using {x} instead.", Fore.CYAN)
     timestamp = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
     specific_log = os.path.join(RESULTS_DIR, f"collatz_negative_{x}_{timestamp}.txt")
     specific_log_path = os.path.abspath(specific_log)
@@ -525,7 +532,8 @@ def negative_mode():
             log("WARNING", f"Could not write to {specific_log}", Fore.YELLOW)
     write_specific(f"Negative calculation for n = {x} - started {datetime.now(tz_rome).strftime(FMT)}")
     write_specific("=== STEPS ===")
-    try: collatz_negative(x, verbose=True, log_writer=write_specific)
+    try:
+        collatz_negative(x, verbose=True, log_writer=write_specific)
     except CycleDetectedError as e:
         log("INFO", "CYCLE DETECTED", Fore.YELLOW)
         log("INFO", f"Re-entry node     : {e.node}", Fore.GREEN)
