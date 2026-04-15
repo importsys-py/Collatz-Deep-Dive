@@ -1,94 +1,186 @@
-```markdown
-# Collatz-Deep-Dive v1.0
+---
 
-A powerful, colorful, and high‑performance tool for exploring the Collatz conjecture ($3n+1$ problem) with parallel processing, cycle detection for negative inputs, extensive logging, and cross‑platform desktop notifications.
+COLLATZ DEEP DRIVE v2.0
 
-![Python Version](https://img.shields.io/badge/python-3.9+-blue)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![License](https://img.shields.io/badge/license-MIT-green)
+Collatz Deep Drive is a high-performance, feature-rich command-line application designed to explore the Collatz conjecture (3n + 1 problem) in depth. It combines optimized computation, parallel processing, cycle detection for negative integers, detailed logging, and cross-platform desktop notifications.
 
-## ✨ Features
+The tool is built for both experimentation and large-scale numerical testing, with a strong focus on performance, correctness, and observability.
 
-- **Manual Calculation** – Compute the Collatz sequence for any positive integer with real‑time step display and detailed statistics.
-- **Powers Test** – Automatically test sequences of the form $base^{exponent}$. For $base = 2$, it verifies expected properties. **Parallel execution** utilizes all available CPU cores for maximum throughput.
-- **Negative Numbers** – Explore the extended Collatz function on negative integers. Integrated **cycle detection** identifies re‑entry points and cycle lengths.
-- **Optimized Calculation Backends**:
-  - `collatz_step` – Fully verified with reverse checks.
-  - `collatz_fast` – Lightweight, streamlined logic.
-  - `collatz_superfast` – Uses trailing‑zero counts to skip multiple even steps in a single operation.
-- **Rich Console Output** – Color‑coded steps and dynamic progress bars.
-- **Automatic Logging** – Every session generates timestamped logs in `logs/results/`.
-- **Desktop Notifications** – Receive alerts when long‑running tests finish.
+Compatibility:
 
-## 📋 Table of Contents
-
-- [Installation](#installation)
-- [Usage](#usage)
-- [Directory Structure](#directory-structure)
-- [Performance Notes](#performance-notes)
-- [Acknowledgments](#acknowledgments)
-- [License](#license)
-
-## 🔧 Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone [https://github.com/importsyss/Collatz-Deep-Dive.git](https://github.com/importsyss/Collatz-Deep-Dive.git)
-   cd Collatz-Deep-Dive
-   ```
-
-2. **Setup environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate      # Linux/macOS
-   venv\Scripts\activate         # Windows
-   pip install -r other/requirements.txt
-   ```
-
-3. **Run**
-   ```bash
-   python collatz.py
-   ```
-
-## 🚀 Usage
-
-### Main Menu
-The interactive CLI allows you to choose between manual mode, powers testing (parallelized), and negative number exploration. You can also reset all logs directly from the menu.
-
-### Manual Mode
-Enter any positive integer. For numbers $\le 10^4$, the sequence is printed with color highlights (Blue for even, Yellow for odd).
-
-### Negative Mode
-Integrated **cycle detection** pinpoint infinite loops in the negative domain, showing entry points and cycle lengths.
-
-## 📁 Directory Structure
-
-```text
-Collatz-Deep-Dive/
-├── collatz.py               # Main application
-├── other/
-│   └── requirements.txt     # Dependencies
-├── logs/
-│   ├── debug/               # System logs
-│   └── results/             # Calculation results
-└── README.md
-```
-
-## ⚡ Performance Notes
-- **Bit Manipulation:** Uses bit-shifting in `superfast` mode for rapid division of even numbers.
-- **Multiprocessing:** Distributes heavy testing across `cpu_count() - 1` cores.
-- **Large Integers:** Supports numbers with thousands of digits by overriding default string conversion limits.
-
-## 🙏 Acknowledgments
-This project was envisioned and developed by **importsyss**, who provided the core ideas, the project's foundation, and the overall architectural direction.
-
-Technical refinement and optimization were supported by:
-- **Gemini** & **DeepSeek** – Primary assistance with logic optimization and parallel processing.
-- **Claude** – Contributions to specific code segments and documentation formatting.
-
-## 📄 License
-Distributed under the MIT License. See `LICENSE` for more information.
+* Python 3.9 or higher
+* Windows, macOS, Linux
+  License: MIT
 
 ---
-*Happy Collatz exploring!* 🔢✨
-```.
+
+CORE FEATURES
+
+Manual Calculation
+Compute the Collatz sequence for any positive integer with optional full step-by-step output.
+Includes:
+
+* real-time colored visualization (even/odd steps)
+* total steps, even/odd counts
+* peak value reached during the sequence
+* execution time measurement
+* automatic consistency verification of counters
+
+Powers Test (Parallel Engine)
+Efficiently evaluates sequences of the form base^exponent.
+Key capabilities:
+
+* automatic batching and multiprocessing (cpu_count() - 1 cores)
+* per-run performance timing (milliseconds)
+* distribution analysis of even vs odd steps
+* peak value tracking for each sequence
+* anomaly detection with interactive continuation
+* optional validation for powers of 2 (expected: steps = exponent, odd = 0)
+
+Negative Numbers Mode
+Extends the Collatz function to negative integers.
+Includes:
+
+* deterministic cycle detection using visited-state tracking
+* identification of:
+
+  * cycle entry point
+  * cycle length
+* detailed step logging and visualization
+
+---
+
+CALCULATION ENGINES
+
+collatz_step
+Validated implementation with reverse checks to guarantee correctness.
+
+collatz_fast
+Lightweight version optimized for speed with minimal overhead.
+
+collatz_superfast
+Highly optimized engine that compresses multiple even steps into one operation using bit manipulation (trailing zero counting).
+This is the fastest available backend and is used in large-scale tests.
+
+---
+
+PERFORMANCE DESIGN
+
+Bit-Level Optimization
+Even-number divisions are accelerated using bitwise operations and trailing-zero counting.
+
+Multiprocessing
+The powers test distributes workloads across multiple processes, maximizing CPU utilization.
+
+Large Integer Support
+Handles extremely large integers (thousands of digits) by removing Python’s default string conversion limits.
+
+Batch Execution
+Parallel tests are grouped into batches to reduce overhead and improve throughput.
+
+---
+
+LOGGING SYSTEM
+
+The application automatically generates detailed logs for every operation.
+
+Directory structure:
+
+* logs/debug/     → system-level logs and errors
+* logs/results/   → results of calculations and tests
+
+Features:
+
+* timestamped entries (Europe/Rome timezone)
+* structured output for reproducibility
+* separate log files for each run
+* anomaly and error tracking
+
+A built-in option allows full reset of all logs.
+
+---
+
+DESKTOP NOTIFICATIONS
+
+The application sends notifications when long-running tasks complete.
+
+Platform support:
+
+* Windows → plyer (if available)
+* macOS → osascript
+* Linux → notify-send or zenity fallback
+
+---
+
+USER INTERFACE
+
+Interactive CLI menu with the following options:
+
+1. Manual calculation
+2. Powers test (parallel-ready)
+3. Negative numbers (cycle detection)
+   c. Reset all logs
+   q. Exit
+
+Features:
+
+* colored terminal output (via colorama)
+* formatted tables for large tests
+* progress visualization (bars and statistics)
+* safe input handling and interruption support
+
+---
+
+ERROR HANDLING
+
+Robust error management system with custom exceptions:
+
+* InvalidInputError → invalid user input
+* CalculationError → arithmetic inconsistencies
+* CycleDetectedError → detected cycles in negative mode
+
+All critical errors are logged with stack traces for debugging.
+
+---
+
+PROJECT STRUCTURE
+
+Collatz-Deep-Dive/
+
+* collatz.py              → main application
+* other/
+
+  * requirements.txt      → dependencies
+* logs/
+
+  * debug/                → internal logs
+  * results/              → execution outputs
+
+---
+
+TYPICAL USE CASES
+
+* Studying Collatz sequence behavior
+* Testing large ranges of exponential inputs
+* Investigating parity distribution (even vs odd steps)
+* Exploring negative-domain cycles
+* Benchmarking integer sequence performance
+
+---
+
+ACKNOWLEDGMENTS
+
+The project was created and designed by importsyss, including the core architecture and implementation.
+
+AI-assisted development contributions:
+
+* Gemini and DeepSeek → optimization strategies and parallel processing
+* Claude → support for specific components and documentation refinement
+
+---
+
+LICENSE
+
+This project is distributed under the MIT License. See the LICENSE file for details.
+
+---
