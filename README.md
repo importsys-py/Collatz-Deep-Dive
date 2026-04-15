@@ -1,186 +1,193 @@
 ---
 
-COLLATZ DEEP DRIVE v2.0
+# Collatz Deep Drive v2.0
 
-Collatz Deep Drive is a high-performance, feature-rich command-line application designed to explore the Collatz conjecture (3n + 1 problem) in depth. It combines optimized computation, parallel processing, cycle detection for negative integers, detailed logging, and cross-platform desktop notifications.
-
-The tool is built for both experimentation and large-scale numerical testing, with a strong focus on performance, correctness, and observability.
-
-Compatibility:
-
-* Python 3.9 or higher
-* Windows, macOS, Linux
-  License: MIT
+A powerful, high-performance CLI tool for exploring the Collatz conjecture (3n + 1 problem), featuring parallel computation, cycle detection for negative integers, advanced logging, and cross-platform notifications.
 
 ---
 
-CORE FEATURES
+## Features
 
-Manual Calculation
-Compute the Collatz sequence for any positive integer with optional full step-by-step output.
-Includes:
+### Manual Calculation
 
-* real-time colored visualization (even/odd steps)
-* total steps, even/odd counts
-* peak value reached during the sequence
+Compute the Collatz sequence for any positive integer with:
+
+* real-time step-by-step visualization
+* colored output (even / odd steps)
+* total steps, even/odd counters
+* peak value tracking
 * execution time measurement
-* automatic consistency verification of counters
+* automatic counter validation
 
-Powers Test (Parallel Engine)
-Efficiently evaluates sequences of the form base^exponent.
-Key capabilities:
+---
 
-* automatic batching and multiprocessing (cpu_count() - 1 cores)
-* per-run performance timing (milliseconds)
-* distribution analysis of even vs odd steps
-* peak value tracking for each sequence
-* anomaly detection with interactive continuation
-* optional validation for powers of 2 (expected: steps = exponent, odd = 0)
+### Powers Test (Parallel Engine)
 
-Negative Numbers Mode
-Extends the Collatz function to negative integers.
+Test numbers of the form:
+
+base^exponent
+
 Includes:
 
-* deterministic cycle detection using visited-state tracking
-* identification of:
-
-  * cycle entry point
-  * cycle length
-* detailed step logging and visualization
-
----
-
-CALCULATION ENGINES
-
-collatz_step
-Validated implementation with reverse checks to guarantee correctness.
-
-collatz_fast
-Lightweight version optimized for speed with minimal overhead.
-
-collatz_superfast
-Highly optimized engine that compresses multiple even steps into one operation using bit manipulation (trailing zero counting).
-This is the fastest available backend and is used in large-scale tests.
+* multiprocessing across CPU cores
+* batch execution for performance
+* per-number timing (ms)
+* even/odd distribution analysis
+* peak tracking
+* anomaly detection
+* optional validation for powers of 2
 
 ---
 
-PERFORMANCE DESIGN
+### Negative Numbers (Cycle Detection)
 
-Bit-Level Optimization
-Even-number divisions are accelerated using bitwise operations and trailing-zero counting.
+Explore Collatz behavior over negative integers:
 
-Multiprocessing
-The powers test distributes workloads across multiple processes, maximizing CPU utilization.
-
-Large Integer Support
-Handles extremely large integers (thousands of digits) by removing Python’s default string conversion limits.
-
-Batch Execution
-Parallel tests are grouped into batches to reduce overhead and improve throughput.
+* automatic cycle detection
+* entry point identification
+* cycle length calculation
+* full step logging
 
 ---
 
-LOGGING SYSTEM
+### Optimized Engines
 
-The application automatically generates detailed logs for every operation.
+* collatz_step
+  Verified implementation with reverse checks
 
-Directory structure:
+* collatz_fast
+  Lightweight and efficient
 
-* logs/debug/     → system-level logs and errors
-* logs/results/   → results of calculations and tests
+* collatz_superfast
+  Uses bit manipulation (trailing-zero compression) to skip multiple steps at once
+
+---
+
+### Logging System
+
+All runs are automatically logged:
+
+logs/debug/
+logs/results/
 
 Features:
 
-* timestamped entries (Europe/Rome timezone)
-* structured output for reproducibility
-* separate log files for each run
-* anomaly and error tracking
-
-A built-in option allows full reset of all logs.
+* timestamped logs (Europe/Rome timezone)
+* separate files per run
+* anomaly tracking
+* full reproducibility
 
 ---
 
-DESKTOP NOTIFICATIONS
+### Desktop Notifications
 
-The application sends notifications when long-running tasks complete.
+Cross-platform notifications when tasks complete:
 
-Platform support:
-
-* Windows → plyer (if available)
+* Windows → plyer
 * macOS → osascript
-* Linux → notify-send or zenity fallback
+* Linux → notify-send / zenity
 
 ---
 
-USER INTERFACE
+## Installation
 
-Interactive CLI menu with the following options:
+Clone the repository:
+
+git clone [https://github.com/importsys-py/Collatz-Deep-Dive.git](https://github.com/importsys-py/Collatz-Deep-Dive.git)
+cd Collatz-Deep-Dive
+
+Create virtual environment:
+
+python -m venv venv
+
+Activate:
+
+Linux/macOS:
+source venv/bin/activate
+
+Windows:
+venv\Scripts\activate
+
+Install dependencies:
+
+pip install -r other/requirements.txt
+
+Run:
+
+python collatz.py
+
+---
+
+## Usage
+
+Interactive CLI menu:
 
 1. Manual calculation
 2. Powers test (parallel-ready)
 3. Negative numbers (cycle detection)
-   c. Reset all logs
+   c. Reset logs
    q. Exit
 
-Features:
+---
 
-* colored terminal output (via colorama)
-* formatted tables for large tests
-* progress visualization (bars and statistics)
-* safe input handling and interruption support
+## Performance
+
+* Bit-level optimizations for even steps
+* Multiprocessing using cpu_count() - 1
+* Handles extremely large integers
+* Batch execution for reduced overhead
 
 ---
 
-ERROR HANDLING
+## Error Handling
 
-Robust error management system with custom exceptions:
+Custom exceptions:
 
-* InvalidInputError → invalid user input
-* CalculationError → arithmetic inconsistencies
-* CycleDetectedError → detected cycles in negative mode
+* InvalidInputError
+* CalculationError
+* CycleDetectedError
 
-All critical errors are logged with stack traces for debugging.
+All errors are logged with stack traces.
 
 ---
 
-PROJECT STRUCTURE
+## Project Structure
 
 Collatz-Deep-Dive/
 
-* collatz.py              → main application
-* other/
+collatz.py            → main application
+other/
+requirements.txt    → dependencies
 
-  * requirements.txt      → dependencies
-* logs/
-
-  * debug/                → internal logs
-  * results/              → execution outputs
-
----
-
-TYPICAL USE CASES
-
-* Studying Collatz sequence behavior
-* Testing large ranges of exponential inputs
-* Investigating parity distribution (even vs odd steps)
-* Exploring negative-domain cycles
-* Benchmarking integer sequence performance
+logs/
+debug/              → system logs
+results/            → outputs
 
 ---
 
-ACKNOWLEDGMENTS
+## Use Cases
 
-The project was created and designed by importsyss, including the core architecture and implementation.
-
-AI-assisted development contributions:
-
-* Gemini and DeepSeek → optimization strategies and parallel processing
-* Claude → support for specific components and documentation refinement
+* studying Collatz sequences
+* testing large exponential inputs
+* analyzing parity distribution
+* detecting cycles in negative domain
+* performance benchmarking
 
 ---
 
-LICENSE
+## Acknowledgments
 
-This project is distributed under the MIT License. See the LICENSE file for details.
+Created by importsyss
+
+AI-assisted development:
+
+* Gemini and DeepSeek → optimization and parallel logic
+* Claude → code and documentation refinement
+
+---
+
+## License
+
+MIT License
 
 ---
