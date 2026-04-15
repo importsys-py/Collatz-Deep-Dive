@@ -1,5 +1,5 @@
 ```markdown
-# Collatz Deep Drive v2.0
+# Collatz Deep Drive v1.0
 
 A powerful, colorful, and high‑performance tool for exploring the Collatz conjecture (3n+1 problem) with parallel processing, cycle detection for negative inputs, extensive logging, and cross‑platform desktop notifications.
 
@@ -53,9 +53,10 @@ A powerful, colorful, and high‑performance tool for exploring the Collatz conj
 
 3. **Install dependencies**
    ```bash
-   pip install colorama plyer
+   pip install -r other/requirements.txt
    ```
-   > `plyer` is optional – it enables native Windows notifications. On macOS/Linux, notifications work out‑of‑the‑box via `osascript` / `notify-send`.
+   > The `requirements.txt` file inside the `other/` directory lists all required packages.  
+   > If you prefer to install manually: `pip install colorama plyer` (where `plyer` is optional for Windows notifications).
 
 4. **Run the program**
    ```bash
@@ -117,6 +118,8 @@ Press `c` to delete the entire `logs/` directory and recreate it fresh.
 ```
 collatz-deep-drive/
 ├── collatz.py               # Main program
+├── other/
+│   └── requirements.txt     # Python dependencies
 ├── logs/
 │   ├── debug/
 │   │   └── collatz.log      # Global debug log (all runs)
