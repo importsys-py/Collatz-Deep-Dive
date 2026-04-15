@@ -4,16 +4,17 @@ import os
 import time
 import threading
 import queue
+import multiprocessing
+import traceback
+import shutil
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from colorama import init, Fore, Style
-import tkinter as tk
-from tkinter import ttk
 
 init(autoreset=True)
 
 tz_rome   = ZoneInfo("Europe/Rome")
-FMT       = "%d/%m/%Y %H:%M:%S"
+FMT       = "%d/%m/%Y %H:%M:%S.%f"
 
 LOGS_DIR      = "logs"
 RESULTS_DIR   = os.path.join(LOGS_DIR, "results")
@@ -26,6 +27,11 @@ for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
     except OSError:
         pass
 
+import platform
+_PLATFORM = platform.system()
+
+_CPU_COUNT = max(1, multiprocessing.cpu_count() - 1)
+
 class CalculationError(Exception): pass
 class InvalidInputError(ValueError): pass
 class CycleDetectedError(Exception):
@@ -35,20 +41,22 @@ class CycleDetectedError(Exception):
         self.length = length
         super().__init__(f"Cycle detected: re-entry at {node} at step {entry_step}, length={length}")
 
-def _write_log(level: str, message: str):
+def _write_log(level: str, message: str, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
     try:
         with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{now}] [{level}] {message}\n")
+            if exc_info:
+                f.write(traceback.format_exc())
     except (OSError, IOError):
         pass
 
-def log(level: str, message: str, color=Fore.GREEN):
+def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
     print(f"{Fore.LIGHTBLACK_EX}[{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}{now}{Style.RESET_ALL}{Fore.LIGHTBLACK_EX}]{Style.RESET_ALL} "
           f"{Fore.LIGHTBLACK_EX}[{Style.RESET_ALL}{color}{level}{Style.RESET_ALL}{Fore.LIGHTBLACK_EX}]{Style.RESET_ALL} "
           f"{color}{message}{Style.RESET_ALL}")
-    _write_log(level, message)
+    _write_log(level, message, exc_info)
 
 def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
@@ -65,6 +73,28 @@ def wait_for_enter(prompt="\nPress Enter to continue..."):
     flush_input()
     try: input(prompt)
     except (EOFError, KeyboardInterrupt): pass
+
+def send_notification(title: str, message: str):
+    try:
+        if _PLATFORM == "Windows":
+            try:
+                from plyer import notification
+                notification.notify(title=title, message=message, app_name="Collatz Deep Drive", timeout=8)
+                return
+            except ImportError:
+                pass
+        elif _PLATFORM == "Darwin":
+            safe_title   = title.replace("'", "\\'")
+            safe_message = message.replace("'", "\\'")
+            os.system(f"osascript -e 'display notification \"{safe_message}\" with title \"{safe_title}\"'")
+        elif _PLATFORM == "Linux":
+            safe_title   = title.replace('"', '\\"')
+            safe_message = message.replace('"', '\\"')
+            ret = os.system(f'notify-send "{safe_title}" "{safe_message}" 2>/dev/null')
+            if ret != 0:
+                os.system(f'zenity --info --title="{safe_title}" --text="{safe_message}" --timeout=8 2>/dev/null &')
+    except Exception:
+        pass
 
 def collatz_step(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
@@ -92,8 +122,7 @@ def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, p
         old = n
         try: n, is_even = collatz_step(n)
         except CalculationError as e:
-            log("CALCULATION ERROR", str(e), Fore.RED)
-            _write_log("CALCULATION ERROR", str(e))
+            log("CALCULATION ERROR", str(e), Fore.RED, exc_info=True)
             raise
         if n > peak: peak = n
         if is_even: even += 1
@@ -101,8 +130,7 @@ def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, p
         steps += 1
         try: verify_counters(steps, even, odd)
         except CalculationError as e:
-            log("COUNTER ERROR", str(e), Fore.RED)
-            _write_log("COUNTER ERROR", str(e))
+            log("COUNTER ERROR", str(e), Fore.RED, exc_info=True)
             raise
         if verbose:
             step_type = f"{Fore.BLUE}E{Style.RESET_ALL}" if is_even else f"{Fore.YELLOW}O{Style.RESET_ALL}"
@@ -156,6 +184,33 @@ def collatz_superfast(n: int, progress_callback=None, log_writer=None):
             except Exception: pass
     return steps, even, odd, n, peak
 
+def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
+    steps = even = odd = 0
+    peak = n
+    while n > 1:
+        if n & 1 == 0:
+            tz = (n & -n).bit_length() - 1
+            n >>= tz
+            even += tz
+            steps += tz
+        else:
+            n = (n << 1) + n + 1
+            odd += 1
+            steps += 1
+        if n > peak: peak = n
+    return steps, even, odd, n, peak
+
+def _worker_power(args):
+    base, i = args
+    n = base ** i
+    t0 = time.perf_counter()
+    try:
+        steps, even, odd, final, peak = _collatz_superfast_pure(n)
+    except Exception as e:
+        return i, 0, 0, 0, 0, 0, str(e)
+    ms = (time.perf_counter() - t0) * 1000
+    return i, steps, even, odd, final, peak, ms
+
 def collatz_step_negative(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
         r = n >> 1
@@ -176,8 +231,7 @@ def collatz_negative(n: int, verbose: bool = True, log_writer=None):
         old = n
         try: n, is_even = collatz_step_negative(n)
         except CalculationError as e:
-            log("CALCULATION ERROR", str(e), Fore.RED)
-            _write_log("CALCULATION ERROR", str(e))
+            log("CALCULATION ERROR", str(e), Fore.RED, exc_info=True)
             raise
         steps += 1
         if verbose:
@@ -201,113 +255,15 @@ def _format_large_number(n: int, max_len: int = 20) -> str:
     exp = len(s) - 1
     return f"{s[0]}.{s[1:4]}e+{exp}"
 
-class ProgressWindow:
-    def __init__(self, title, total_steps_known=False, total_steps=0):
-        self.root = tk.Tk()
-        self.root.title(title)
-        self.root.geometry("500x200")
-        self.root.resizable(False, False)
-        self.root.attributes('-topmost', True)
-        self.total_steps_known = total_steps_known
-        self.total_steps = total_steps
-        self.current_steps = 0
-        self.start_time = time.perf_counter()
-        self.running = True
-        self.queue = queue.Queue()
-        self.calculation_finished = False
-        self.calculation_result = None
-        self.calculation_error = None
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        self.status_label = ttk.Label(main_frame, text="Calculating...", font=('TkDefaultFont', 10, 'bold'))
-        self.status_label.pack(pady=(0,10))
-        self.steps_label = ttk.Label(main_frame, text="Steps: 0")
-        self.steps_label.pack()
-        self.time_label = ttk.Label(main_frame, text="Elapsed time: 0.0 s")
-        self.time_label.pack()
-        self.eta_label = ttk.Label(main_frame, text="")
-        if total_steps_known:
-            self.eta_label.pack()
-            self.progress = ttk.Progressbar(main_frame, orient=tk.HORIZONTAL, length=400, mode='determinate')
-            self.progress.pack(pady=10)
-            self.progress['maximum'] = total_steps
-        else:
-            self.progress = ttk.Progressbar(main_frame, orient=tk.HORIZONTAL, length=400, mode='indeterminate')
-            self.progress.pack(pady=10)
-            self.progress.start(10)
-        self.speed_label = ttk.Label(main_frame, text="Speed: 0 steps/s")
-        self.speed_label.pack()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    def update_progress(self, steps, even, odd, n, peak):
-        try:
-            self.queue.put_nowait(('update', steps, time.perf_counter()))
-        except queue.Full:
-            pass
-
-    def on_closing(self):
-        self.running = False
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
-
-    def process_queue(self):
-        try:
-            while True:
-                msg = self.queue.get_nowait()
-                if msg[0] == 'update':
-                    _, steps, now = msg
-                    self.current_steps = steps
-                    elapsed = now - self.start_time
-                    self.steps_label.config(text=f"Steps: {steps}")
-                    self.time_label.config(text=f"Elapsed time: {elapsed:.2f} s")
-                    speed = steps / elapsed if elapsed > 0 else 0
-                    self.speed_label.config(text=f"Speed: {speed:.2f} steps/s")
-                    if self.total_steps_known:
-                        self.progress['value'] = steps
-                        if steps > 0:
-                            eta = (self.total_steps - steps) / speed if speed > 0 else 0
-                            self.eta_label.config(text=f"Estimated time remaining: {eta:.2f} s")
-                elif msg[0] == 'done':
-                    self.calculation_finished = True
-                    self.calculation_result = msg[1]
-                    self.running = False
-                    self.root.destroy()
-                    return
-                elif msg[0] == 'error':
-                    self.calculation_error = msg[1]
-                    self.running = False
-                    self.root.destroy()
-                    return
-        except queue.Empty: pass
-        except tk.TclError:
-            self.running = False
-            return
-        if self.running:
-            try:
-                self.root.after(100, self.process_queue)
-            except tk.TclError:
-                pass
-
-    def run_calculation(self, target_func, *args, **kwargs):
-        def worker():
-            try:
-                kwargs['progress_callback'] = self.update_progress
-                result = target_func(*args, **kwargs)
-                self.queue.put(('done', result))
-            except Exception as e:
-                self.queue.put(('error', e))
-        self.thread = threading.Thread(target=worker, daemon=True)
-        self.thread.start()
-        self.root.after(100, self.process_queue)
-        try:
-            self.root.mainloop()
-        except tk.TclError:
-            pass
-        if not self.calculation_finished and self.calculation_error is None: return None
-        if self.calculation_error is not None: raise self.calculation_error
-        return self.calculation_result
+def reset_logs():
+    try:
+        if os.path.exists(LOGS_DIR):
+            shutil.rmtree(LOGS_DIR)
+        for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
+            os.makedirs(d, exist_ok=True)
+        log("INFO", "All log files have been deleted and directories recreated.", Fore.CYAN)
+    except Exception as e:
+        log("ERROR", f"Failed to reset logs: {e}", Fore.RED, exc_info=True)
 
 def test_powers():
     base = 2
@@ -341,8 +297,20 @@ def test_powers():
         except KeyboardInterrupt:
             log("INFO", "Test cancelled", Fore.YELLOW)
             return
-    log("INFO", f"POWERS TEST OF {base} — start", Fore.MAGENTA)
-    COL_EXP, COL_STEPS, COL_EVEN, COL_ODD, COL_PCT, COL_PEAK, COL_MS, COL_OK, COL_DIST = 8, 10, 10, 10, 8, 28, 10, 5, 29
+
+    use_parallel = False
+    if _CPU_COUNT > 1:
+        try:
+            resp_par = input(Fore.CYAN + f"Use parallel computation ({_CPU_COUNT} CPU cores)? (y/n, default y): " + Style.RESET_ALL).strip().lower()
+            use_parallel = (resp_par != 'n')
+        except KeyboardInterrupt:
+            log("INFO", "Test cancelled", Fore.YELLOW)
+            return
+
+    BATCH = max(4, _CPU_COUNT * 2) if use_parallel else 1
+
+    log("INFO", f"POWERS TEST OF {base} — start (parallel={use_parallel}, cores={_CPU_COUNT})", Fore.MAGENTA)
+    COL_EXP, COL_STEPS, COL_EVEN, COL_ODD, COL_PCT, COL_PEAK, COL_MS, COL_OK, COL_DIST = 9, 11, 10, 9, 9, 30, 10, 5, 29
     TOT = COL_EXP + COL_STEPS + COL_EVEN + COL_ODD + COL_PCT + COL_DIST + COL_PEAK + COL_MS + COL_OK
     sep = Fore.LIGHTBLACK_EX + "─" * TOT + Style.RESET_ALL
     header = (f"{Fore.LIGHTBLACK_EX}{'EXP':<{COL_EXP}}{'STEPS':<{COL_STEPS}}{'EVEN':<{COL_EVEN}}{'ODD':<{COL_ODD}}{'%EVEN':<{COL_PCT}}"
@@ -359,71 +327,158 @@ def test_powers():
             log("WARNING", f"Could not write to {specific_log}", Fore.YELLOW)
     write_specific(f"Powers test of {base} - started {datetime.now(tz_rome).strftime(FMT)}")
     write_specific("")
-    for i in range(1, 1_000_000_000):
-        n_orig = base ** i
-        t0 = time.perf_counter()
+
+    interrupted = False
+
+    if use_parallel:
         try:
-            # Utilizzo di collatz_superfast per maggiore efficienza
-            steps, even, odd, final, peak = collatz_superfast(n_orig)
-        except KeyboardInterrupt:
-            log("INFO", "Test interrupted by user", Fore.YELLOW)
-            break
+            pool = multiprocessing.Pool(processes=_CPU_COUNT)
         except Exception as e:
-            log("FATAL ERROR", f"{base}^{i}: {e}", Fore.RED)
-            _write_log("FATAL ERROR", f"{base}^{i}: {e}")
-            write_specific(f"FATAL ERROR {base}^{i}: {e}")
-            log("INFO", f"Test interrupted at power {base}^{i}", Fore.RED)
-            break
-        ms = (time.perf_counter() - t0) * 1000
-        ok = (final == 1 and steps == i and odd == 0) if verify_conditions else True
-        tot_steps += steps; tot_even += even; tot_odd += odd
-        if steps > max_steps: max_steps = steps
-        if peak > max_peak: max_peak = peak
-        counter += 1
-        if not ok:
-            log("ERROR", f"{base}^{i} — unexpected result: final={final}, steps={steps}, odd={odd}", Fore.RED)
-            _write_log("ERROR", f"{base}^{i} | final={final} steps={steps} odd={odd}")
-            write_specific(f"ANOMALY {base}^{i}: final={final} steps={steps} odd={odd}")
-            print(f"\n{Fore.RED}{'─'*60}{Style.RESET_ALL}\n  {Fore.RED}ANOMALY DETECTED{Style.RESET_ALL} — {base}^{i}\n"
-                  f"  Final value    : {Fore.RED}{final}{Style.RESET_ALL}  (expected 1)\n"
-                  f"  Total steps    : {steps}  (expected {i})\n  Odd steps      : {odd}  (expected 0)\n"
-                  f"{Fore.RED}{'─'*60}{Style.RESET_ALL}\n")
-            if auto_yes:
-                choice = "y"
-                print(f"  {Fore.YELLOW}Automatic continuation...{Style.RESET_ALL}")
-            else:
-                while True:
-                    try: choice = input(f"  {Fore.YELLOW}Continue test? [{Fore.GREEN}y{Fore.YELLOW}/{Fore.RED}n{Fore.YELLOW}]: {Style.RESET_ALL}").strip().lower()
-                    except KeyboardInterrupt: choice = "n"
-                    if choice in ("y","yes"):
-                        log("INFO", f"Continuation requested after anomaly on {base}^{i}", Fore.YELLOW)
-                        _write_log("INFO", f"User chose to continue after anomaly on {base}^{i}")
-                        write_specific(f"User chose to continue after anomaly on {base}^{i}")
-                        break
-                    elif choice in ("n","no"):
-                        log("INFO", f"Test interrupted by user at power {base}^{i}", Fore.RED)
-                        _write_log("INFO", f"User interrupted test at power {base}^{i}")
-                        write_specific(f"Test interrupted by user at power {base}^{i}")
-                        print()
-                        break
-                    else: print(f"  {Fore.RED}Invalid response.{Style.RESET_ALL}")
-            if choice in ("n","no"): break
-        pct = even / steps if steps else 0
-        bar_e = _bar(even, steps, 12)
-        bar_o = _bar(odd, steps, 12)
-        dist_str = f"{Fore.BLUE}{bar_e}{Style.RESET_ALL}{Fore.LIGHTBLACK_EX}│{Style.RESET_ALL}{Fore.YELLOW}{bar_o}{Style.RESET_ALL}"
-        peak_str = _format_large_number(peak, max_len=COL_PEAK-2)
-        print(f"{Fore.CYAN}{str(base)+'^'+str(i):<{COL_EXP}}{Style.RESET_ALL}"
-              f"{Fore.WHITE}{steps:<{COL_STEPS}}{Style.RESET_ALL}"
-              f"{Fore.BLUE}{even:<{COL_EVEN}}{Style.RESET_ALL}"
-              f"{Fore.YELLOW}{odd:<{COL_ODD}}{Style.RESET_ALL}"
-              f"{Fore.LIGHTBLACK_EX}{pct:<{COL_PCT}.1%}{Style.RESET_ALL}"
-              f"{dist_str}   "
-              f"{Fore.LIGHTBLACK_EX}{peak_str:<{COL_PEAK}}{Style.RESET_ALL}"
-              f"{Fore.MAGENTA}{ms:<{COL_MS}.3f}{Style.RESET_ALL}"
-              f"{Fore.GREEN}✓{Style.RESET_ALL}")
-        _write_log("TEST", f"{base}^{i} | steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
-        write_specific(f"{base}^{i}: steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
+            log("WARNING", f"Could not create process pool ({e}). Falling back to sequential.", Fore.YELLOW)
+            use_parallel = False
+
+    if use_parallel:
+        i = 1
+        try:
+            while True:
+                batch_args = [(base, i + k) for k in range(BATCH)]
+                try:
+                    results = pool.map(_worker_power, batch_args)
+                except KeyboardInterrupt:
+                    log("INFO", "Test interrupted by user", Fore.YELLOW)
+                    interrupted = True
+                    break
+                except Exception as e:
+                    log("ERROR", f"Unexpected error in parallel execution: {e}", Fore.RED, exc_info=True)
+                    interrupted = True
+                    break
+                for res in results:
+                    if len(res) == 7 and isinstance(res[6], str):
+                        idx, _, _, _, _, _, err_msg = res
+                        log("ERROR", f"{base}^{idx} - worker error: {err_msg}", Fore.RED)
+                        continue
+                    idx, steps, even, odd, final, peak, ms = res
+                    ok = (final == 1 and steps == idx and odd == 0) if verify_conditions else True
+                    tot_steps += steps; tot_even += even; tot_odd += odd
+                    if steps > max_steps: max_steps = steps
+                    if peak > max_peak: max_peak = peak
+                    counter += 1
+                    if not ok:
+                        log("ERROR", f"{base}^{idx} — unexpected result: final={final}, steps={steps}, odd={odd}", Fore.RED)
+                        _write_log("ERROR", f"{base}^{idx} | final={final} steps={steps} odd={odd}")
+                        write_specific(f"ANOMALY {base}^{idx}: final={final} steps={steps} odd={odd}")
+                        print(f"\n{Fore.RED}{'─'*60}{Style.RESET_ALL}\n  {Fore.RED}ANOMALY DETECTED{Style.RESET_ALL} — {base}^{idx}\n"
+                              f"  Final value    : {Fore.RED}{final}{Style.RESET_ALL}  (expected 1)\n"
+                              f"  Total steps    : {steps}  (expected {idx})\n  Odd steps      : {odd}  (expected 0)\n"
+                              f"{Fore.RED}{'─'*60}{Style.RESET_ALL}\n")
+                        if auto_yes:
+                            choice = "y"
+                            print(f"  {Fore.YELLOW}Automatic continuation...{Style.RESET_ALL}")
+                        else:
+                            while True:
+                                try: choice = input(f"  {Fore.YELLOW}Continue test? [{Fore.GREEN}y{Fore.YELLOW}/{Fore.RED}n{Fore.YELLOW}]: {Style.RESET_ALL}").strip().lower()
+                                except KeyboardInterrupt: choice = "n"
+                                if choice in ("y","yes"):
+                                    log("INFO", f"Continuation requested after anomaly on {base}^{idx}", Fore.YELLOW)
+                                    _write_log("INFO", f"User chose to continue after anomaly on {base}^{idx}")
+                                    write_specific(f"User chose to continue after anomaly on {base}^{idx}")
+                                    break
+                                elif choice in ("n","no"):
+                                    log("INFO", f"Test interrupted by user at power {base}^{idx}", Fore.RED)
+                                    _write_log("INFO", f"User interrupted test at power {base}^{idx}")
+                                    write_specific(f"Test interrupted by user at power {base}^{idx}")
+                                    print()
+                                    break
+                                else: print(f"  {Fore.RED}Invalid response.{Style.RESET_ALL}")
+                        if choice in ("n","no"):
+                            interrupted = True
+                            break
+                    pct = even / steps if steps else 0
+                    bar_e = _bar(even, steps, 12)
+                    bar_o = _bar(odd, steps, 12)
+                    dist_str = f"{Fore.BLUE}{bar_e}{Style.RESET_ALL}{Fore.LIGHTBLACK_EX}│{Style.RESET_ALL}{Fore.YELLOW}{bar_o}{Style.RESET_ALL}"
+                    peak_str = _format_large_number(peak, max_len=COL_PEAK-2)
+                    print(f"{Fore.CYAN}{str(base)+'^'+str(idx):<{COL_EXP}}{Style.RESET_ALL}"
+                          f"{Fore.WHITE}{steps:<{COL_STEPS}}{Style.RESET_ALL}"
+                          f"{Fore.BLUE}{even:<{COL_EVEN}}{Style.RESET_ALL}"
+                          f"{Fore.YELLOW}{odd:<{COL_ODD}}{Style.RESET_ALL}"
+                          f"{Fore.LIGHTBLACK_EX}{pct:<{COL_PCT}.1%}{Style.RESET_ALL}"
+                          f"{dist_str}   "
+                          f"{Fore.LIGHTBLACK_EX}{peak_str:<{COL_PEAK}}{Style.RESET_ALL}"
+                          f"{Fore.MAGENTA}{ms:<{COL_MS}.3f}{Style.RESET_ALL}"
+                          f"{Fore.GREEN}✓{Style.RESET_ALL}")
+                    _write_log("TEST", f"{base}^{idx} | steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
+                    write_specific(f"{base}^{idx}: steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
+                if interrupted: break
+                i += BATCH
+        finally:
+            pool.terminate()
+            pool.join()
+    else:
+        for i in range(1, 1_000_000_000):
+            n_orig = base ** i
+            t0 = time.perf_counter()
+            try:
+                steps, even, odd, final, peak = collatz_superfast(n_orig)
+            except KeyboardInterrupt:
+                log("INFO", "Test interrupted by user", Fore.YELLOW)
+                break
+            except Exception as e:
+                log("FATAL ERROR", f"{base}^{i}: {e}", Fore.RED, exc_info=True)
+                write_specific(f"FATAL ERROR {base}^{i}: {e}")
+                log("INFO", f"Test interrupted at power {base}^{i}", Fore.RED)
+                break
+            ms = (time.perf_counter() - t0) * 1000
+            ok = (final == 1 and steps == i and odd == 0) if verify_conditions else True
+            tot_steps += steps; tot_even += even; tot_odd += odd
+            if steps > max_steps: max_steps = steps
+            if peak > max_peak: max_peak = peak
+            counter += 1
+            if not ok:
+                log("ERROR", f"{base}^{i} — unexpected result: final={final}, steps={steps}, odd={odd}", Fore.RED)
+                _write_log("ERROR", f"{base}^{i} | final={final} steps={steps} odd={odd}")
+                write_specific(f"ANOMALY {base}^{i}: final={final} steps={steps} odd={odd}")
+                print(f"\n{Fore.RED}{'─'*60}{Style.RESET_ALL}\n  {Fore.RED}ANOMALY DETECTED{Style.RESET_ALL} — {base}^{i}\n"
+                      f"  Final value    : {Fore.RED}{final}{Style.RESET_ALL}  (expected 1)\n"
+                      f"  Total steps    : {steps}  (expected {i})\n  Odd steps      : {odd}  (expected 0)\n"
+                      f"{Fore.RED}{'─'*60}{Style.RESET_ALL}\n")
+                if auto_yes:
+                    choice = "y"
+                    print(f"  {Fore.YELLOW}Automatic continuation...{Style.RESET_ALL}")
+                else:
+                    while True:
+                        try: choice = input(f"  {Fore.YELLOW}Continue test? [{Fore.GREEN}y{Fore.YELLOW}/{Fore.RED}n{Fore.YELLOW}]: {Style.RESET_ALL}").strip().lower()
+                        except KeyboardInterrupt: choice = "n"
+                        if choice in ("y","yes"):
+                            log("INFO", f"Continuation requested after anomaly on {base}^{i}", Fore.YELLOW)
+                            _write_log("INFO", f"User chose to continue after anomaly on {base}^{i}")
+                            write_specific(f"User chose to continue after anomaly on {base}^{i}")
+                            break
+                        elif choice in ("n","no"):
+                            log("INFO", f"Test interrupted by user at power {base}^{i}", Fore.RED)
+                            _write_log("INFO", f"User interrupted test at power {base}^{i}")
+                            write_specific(f"Test interrupted by user at power {base}^{i}")
+                            print()
+                            break
+                        else: print(f"  {Fore.RED}Invalid response.{Style.RESET_ALL}")
+                if choice in ("n","no"): break
+            pct = even / steps if steps else 0
+            bar_e = _bar(even, steps, 12)
+            bar_o = _bar(odd, steps, 12)
+            dist_str = f"{Fore.BLUE}{bar_e}{Style.RESET_ALL}{Fore.LIGHTBLACK_EX}│{Style.RESET_ALL}{Fore.YELLOW}{bar_o}{Style.RESET_ALL}"
+            peak_str = _format_large_number(peak, max_len=COL_PEAK-2)
+            print(f"{Fore.CYAN}{str(base)+'^'+str(i):<{COL_EXP}}{Style.RESET_ALL}"
+                  f"{Fore.WHITE}{steps:<{COL_STEPS}}{Style.RESET_ALL}"
+                  f"{Fore.BLUE}{even:<{COL_EVEN}}{Style.RESET_ALL}"
+                  f"{Fore.YELLOW}{odd:<{COL_ODD}}{Style.RESET_ALL}"
+                  f"{Fore.LIGHTBLACK_EX}{pct:<{COL_PCT}.1%}{Style.RESET_ALL}"
+                  f"{dist_str}   "
+                  f"{Fore.LIGHTBLACK_EX}{peak_str:<{COL_PEAK}}{Style.RESET_ALL}"
+                  f"{Fore.MAGENTA}{ms:<{COL_MS}.3f}{Style.RESET_ALL}"
+                  f"{Fore.GREEN}✓{Style.RESET_ALL}")
+            _write_log("TEST", f"{base}^{i} | steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
+            write_specific(f"{base}^{i}: steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
+
     print(sep)
     log("INFO", f"Numbers tested : {counter}", Fore.CYAN)
     log("INFO", f"Total steps    : {tot_steps}", Fore.WHITE)
@@ -441,6 +496,10 @@ def test_powers():
     write_specific(f"Test ended     : {datetime.now(tz_rome).strftime(FMT)}")
     log("INFO", f"Detailed log saved to: {specific_log_path}", Fore.CYAN)
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
+    send_notification(
+        "Collatz Deep Drive",
+        f"Powers test of {base} complete — {counter} numbers tested, max steps: {max_steps}"
+    )
 
 def read_integer(prompt: str) -> int:
     while True:
@@ -448,8 +507,8 @@ def read_integer(prompt: str) -> int:
             raw = input(prompt).strip().replace("_", "").replace(" ", "")
             if not raw: raise InvalidInputError("Empty input")
             return int(raw)
-        except (ValueError, InvalidInputError):
-            log("ERROR", "Invalid input: please enter an integer", Fore.RED)
+        except (ValueError, InvalidInputError) as e:
+            log("ERROR", f"Invalid input: {e}", Fore.RED)
         except KeyboardInterrupt:
             raise
 
@@ -477,12 +536,20 @@ def manual_mode():
     try:
         steps, even, odd, final, peak = collatz_fast(x, verbose=verbose, log_writer=log_writer)
     except CalculationError as e:
-        log("FATAL ERROR", f"Calculation interrupted due to arithmetic error: {e}", Fore.RED); write_specific(f"FATAL ERROR: {e}"); return
+        log("FATAL ERROR", f"Calculation interrupted due to arithmetic error: {e}", Fore.RED, exc_info=True)
+        write_specific(f"FATAL ERROR: {e}")
+        return
     except InvalidInputError as e:
-        log("INPUT ERROR", str(e), Fore.RED); write_specific(f"INPUT ERROR: {e}"); return
+        log("INPUT ERROR", str(e), Fore.RED)
+        write_specific(f"INPUT ERROR: {e}")
+        return
     except KeyboardInterrupt:
         log("INFO", "Calculation interrupted by user", Fore.YELLOW)
         write_specific("Calculation interrupted by user")
+        return
+    except Exception as e:
+        log("UNEXPECTED ERROR", f"{type(e).__name__}: {e}", Fore.RED, exc_info=True)
+        write_specific(f"UNEXPECTED ERROR: {e}")
         return
     elapsed = time.perf_counter() - t0
     print("\n──────── RESULTS ────────\n")
@@ -509,6 +576,10 @@ def manual_mode():
     write_specific(f"Calculation ended: {datetime.now(tz_rome).strftime(FMT)}")
     log("INFO", f"Detailed log saved to: {specific_log_path}", Fore.CYAN)
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
+    send_notification(
+        "Collatz Deep Drive",
+        f"Manual calculation done — n={x}  steps={steps}  peak={_format_large_number(peak, 20)}  time={elapsed:.3f}s"
+    )
 
 def negative_mode():
     try:
@@ -518,7 +589,6 @@ def negative_mode():
     if x == 0:
         log("ERROR", "0 is not valid for negative Collatz", Fore.RED)
         return
-    # Se l'utente inserisce un numero positivo, lo trasformiamo automaticamente in negativo
     if x > 0:
         x = -x
         log("INFO", f"Positive input detected. Using {x} instead.", Fore.CYAN)
@@ -544,9 +614,12 @@ def negative_mode():
         write_specific(f"Re-entry node     : {e.node}")
         write_specific(f"Entry step        : {e.entry_step}")
         write_specific(f"Cycle length      : {e.length}")
+        send_notification(
+            "Collatz Deep Drive",
+            f"Negative Collatz — cycle detected at node {e.node}, length {e.length} steps"
+        )
     except CalculationError as e:
-        log("FATAL ERROR", f"Calculation interrupted due to arithmetic error: {e}", Fore.RED)
-        _write_log("FATAL ERROR", str(e))
+        log("FATAL ERROR", f"Calculation interrupted due to arithmetic error: {e}", Fore.RED, exc_info=True)
         write_specific(f"FATAL ERROR: {e}")
     except InvalidInputError as e:
         log("INPUT ERROR", str(e), Fore.RED)
@@ -554,29 +627,48 @@ def negative_mode():
     except KeyboardInterrupt:
         log("INFO", "Calculation interrupted by user", Fore.YELLOW)
         write_specific("Calculation interrupted by user")
+    except Exception as e:
+        log("UNEXPECTED ERROR", f"{type(e).__name__}: {e}", Fore.RED, exc_info=True)
+        write_specific(f"UNEXPECTED ERROR: {e}")
     write_specific(f"Calculation ended: {datetime.now(tz_rome).strftime(FMT)}")
     log("INFO", f"Detailed log saved to: {specific_log_path}", Fore.CYAN)
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
 
+_PINK   = "\033[38;5;213m"
+_CYAN   = "\033[36m"
+_DIM    = "\033[2m"
+_BOLD   = "\033[1m"
+_RST    = Style.RESET_ALL
+
+def draw_menu():
+    clear_screen()
+    print()
+    print(f"{_BOLD}{_PINK}{'=' * 50}{_RST}")
+    print(f"{_BOLD}{_PINK}         COLLATZ DEEP DRIVE v2.0{_RST}")
+    print(f"{_DIM}         {_PLATFORM} · {_CPU_COUNT} cores{_RST}")
+    print(f"{_BOLD}{_PINK}{'=' * 50}{_RST}")
+    print()
+    print(f"  {_CYAN}1{_RST}. Manual calculation")
+    print(f"  {_CYAN}2{_RST}. Powers test  ✦ parallel-ready")
+    print(f"  {_CYAN}3{_RST}. Negative numbers  (cycle detection)")
+    print(f"  {_CYAN}c{_RST}. Reset all logs (delete files)")
+    print()
+    print(f"  {_DIM}q{_RST}. Exit")
+    print()
+    print(f"{_BOLD}{_PINK}{'=' * 50}{_RST}")
+    print()
+
 def main():
     while True:
-        clear_screen()
-        print(Style.BRIGHT + Fore.MAGENTA + "╔" + "═" * 44 + "╗")
-        print(Fore.MAGENTA + "║" + Fore.CYAN + Style.BRIGHT + "        COLLATZ CONJECTURE EXPLORER        " + Fore.MAGENTA + " ║")
-        print(Fore.MAGENTA + "╠" + "═" * 44 + "╣")
-        print(Fore.MAGENTA + "║" + Fore.YELLOW + "  1. Manual calculation                    " + Fore.MAGENTA + " ║")
-        print(Fore.MAGENTA + "║" + Fore.YELLOW + "  2. Powers test                           " + Fore.MAGENTA + " ║")
-        print(Fore.MAGENTA + "║" + Fore.YELLOW + "  3. Negative numbers (cycle detection)    " + Fore.MAGENTA + " ║")
-        print(Fore.MAGENTA + "║" + Fore.YELLOW + "  q. Exit                                  " + Fore.MAGENTA + " ║")
-        print(Fore.MAGENTA + "╚" + "═" * 44 + "╝" + Style.RESET_ALL)
+        draw_menu()
         try:
-            c = input(Fore.GREEN + Style.BRIGHT + "\n▶ Choice: " + Style.RESET_ALL).strip().lower()
+            c = input(f"{_BOLD}{_PINK}▶ Choice: {_RST}").strip().lower()
         except KeyboardInterrupt:
             log("INFO", "User interrupt — exiting", Fore.CYAN)
             break
         if c == "q":
             log("INFO", "Exiting program", Fore.CYAN)
-            print(Fore.MAGENTA + "\nThank you for using Collatz Explorer. Goodbye!\n" + Style.RESET_ALL)
+            print(f"{_PINK}\nThank you for using Collatz Deep Drive. Goodbye!\n{_RST}")
             break
         elif c == "1":
             manual_mode()
@@ -588,6 +680,14 @@ def main():
         elif c == "3":
             clear_screen()
             negative_mode()
+            wait_for_enter()
+        elif c == "c":
+            clear_screen()
+            confirm = input(f"{Fore.YELLOW}Are you sure you want to delete all log files? (y/n): {Style.RESET_ALL}").strip().lower()
+            if confirm == 'y':
+                reset_logs()
+            else:
+                log("INFO", "Log reset cancelled.", Fore.CYAN)
             wait_for_enter()
         else:
             log("ERROR", f"Invalid choice: '{c}'", Fore.RED)
