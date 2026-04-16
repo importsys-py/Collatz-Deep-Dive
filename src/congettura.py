@@ -2,8 +2,6 @@ import sys
 sys.set_int_max_str_digits(0)
 import os
 import time
-import threading
-import queue
 import multiprocessing
 import traceback
 import shutil
@@ -15,26 +13,21 @@ import platform
 # ────────────────────────────────────────────────────────────────────────────────
 
 init(autoreset=True)
-
 tz_rome   = ZoneInfo("Europe/Rome")
 FMT       = "%d/%m/%Y %H:%M:%S.%f"
-
 LOGS_DIR      = "logs"
 RESULTS_DIR   = os.path.join(LOGS_DIR, "results")
 DEBUG_DIR     = os.path.join(LOGS_DIR, "debug")
+_SESSION_TIMESTAMP = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
+DEBUG_LOG_FILE = os.path.join(DEBUG_DIR, f"collatz_{_SESSION_TIMESTAMP}.log")
+_PLATFORM = platform.system()
+_CPU_COUNT = max(1, multiprocessing.cpu_count() - 1)
 
 for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
         pass
-
-_SESSION_TIMESTAMP = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
-DEBUG_LOG_FILE = os.path.join(DEBUG_DIR, f"collatz_{_SESSION_TIMESTAMP}.log")
-
-_PLATFORM = platform.system()
-
-_CPU_COUNT = max(1, multiprocessing.cpu_count() - 1)
 
 # ────────────────────────────────────────────────────────────────────────────────
 
