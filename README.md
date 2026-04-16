@@ -42,3 +42,11 @@ On macOS and Linux, the process is similar but uses the Terminal instead of Comm
 
 # Who am I?
 My online name is importsyss, I'm a Discord bot developer, turning 16 soon and a passionate about math, computer science and physics. My goals are to learn AI (ML, DL etc..) and become an AI engineer for some company and obviously solve math problems. I'm not an intelligent person or whatever, I only want to discover new math problems and resolve them. If you want a Discord bot contact me on Discord @importsyss.
+PS: I helped myself with DeepSeek and ChatGPT to make this project, only for the code (obviuosly i write some code), the rest of the ideas is provides by me.
+
+# Proofs
+Here are some photos about the number i mentioned up in this README.md
+
+![Begin](src\img\Screenshot.png)
+![Begin](src\img\Screenshot 2026-04-16 023834.png)
+![Begin](src\img\Screenshot 2026-04-16 023753.png)
