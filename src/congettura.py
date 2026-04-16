@@ -10,6 +10,9 @@ import shutil
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from colorama import init, Fore, Style
+import platform
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 init(autoreset=True)
 
@@ -19,7 +22,6 @@ FMT       = "%d/%m/%Y %H:%M:%S.%f"
 LOGS_DIR      = "logs"
 RESULTS_DIR   = os.path.join(LOGS_DIR, "results")
 DEBUG_DIR     = os.path.join(LOGS_DIR, "debug")
-DEBUG_LOG_FILE = os.path.join(DEBUG_DIR, "collatz.log")
 
 for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
     try:
@@ -27,10 +29,14 @@ for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
     except OSError:
         pass
 
-import platform
+_SESSION_TIMESTAMP = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
+DEBUG_LOG_FILE = os.path.join(DEBUG_DIR, f"collatz_{_SESSION_TIMESTAMP}.log")
+
 _PLATFORM = platform.system()
 
 _CPU_COUNT = max(1, multiprocessing.cpu_count() - 1)
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 class CalculationError(Exception): pass
 class InvalidInputError(ValueError): pass
@@ -40,6 +46,8 @@ class CycleDetectedError(Exception):
         self.entry_step = entry_step
         self.length = length
         super().__init__(f"Cycle detected: re-entry at {node} at step {entry_step}, length={length}")
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def _write_log(level: str, message: str, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
@@ -51,6 +59,8 @@ def _write_log(level: str, message: str, exc_info: bool = False):
     except (OSError, IOError):
         pass
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
     print(f"{Fore.LIGHTBLACK_EX}[{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}{now}{Style.RESET_ALL}{Fore.LIGHTBLACK_EX}]{Style.RESET_ALL} "
@@ -58,8 +68,12 @@ def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
           f"{color}{message}{Style.RESET_ALL}")
     _write_log(level, message, exc_info)
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def flush_input():
     try:
@@ -69,10 +83,14 @@ def flush_input():
         import termios, sys, select
         termios.tcflush(sys.stdin, termios.TCIOFLUSH)
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def wait_for_enter(prompt="\nPress Enter to continue..."):
     flush_input()
     try: input(prompt)
     except (EOFError, KeyboardInterrupt): pass
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def send_notification(title: str, message: str):
     try:
@@ -96,6 +114,8 @@ def send_notification(title: str, message: str):
     except Exception:
         pass
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def collatz_step(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
         r = n >> 1
@@ -106,12 +126,18 @@ def collatz_step(n: int) -> tuple[int, bool]:
         if r & 1 != 0: raise CalculationError(f"3*{n}+1 = {r} — expected even result, got odd")
         return r, False
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def collatz_step_fast(n: int) -> tuple[int, bool]:
     return (n >> 1, True) if n & 1 == 0 else ((n << 1) + n + 1, False)
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def verify_counters(steps: int, even: int, odd: int):
     if even < 0 or odd < 0: raise CalculationError(f"Negative counter — even={even}, odd={odd}")
     if even + odd != steps: raise CalculationError(f"Incorrect counter sum — even({even}) + odd({odd}) = {even + odd}, expected {steps}")
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, progress_callback=None):
     if not isinstance(n, int) or n <= 0: raise InvalidInputError(f"Invalid input: expected integer > 0, got {n!r}")
@@ -144,6 +170,8 @@ def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, p
             except Exception: pass
     return steps, even, odd, n, peak
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callback=None):
     steps = even = odd = 0
     peak = n
@@ -165,6 +193,8 @@ def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callbac
             except Exception: pass
     return steps, even, odd, n, peak
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def collatz_superfast(n: int, progress_callback=None, log_writer=None):
     steps = even = odd = 0
     peak = n
@@ -184,6 +214,8 @@ def collatz_superfast(n: int, progress_callback=None, log_writer=None):
             except Exception: pass
     return steps, even, odd, n, peak
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
     steps = even = odd = 0
     peak = n
@@ -200,16 +232,26 @@ def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
         if n > peak: peak = n
     return steps, even, odd, n, peak
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def _worker_power(args):
     base, i = args
-    n = base ** i
+    try:
+        n = base ** i
+    except OverflowError:
+        return i, 0, 0, 0, 0, 0, "OverflowError during exponentiation"
     t0 = time.perf_counter()
     try:
         steps, even, odd, final, peak = _collatz_superfast_pure(n)
+    except KeyboardInterrupt:
+        # Interruption requested; return a special flag
+        return i, None, None, None, None, None, "INTERRUPTED"
     except Exception as e:
-        return i, 0, 0, 0, 0, 0, str(e)
+        return i, 0, 0, 0, 0, 0, f"{type(e).__name__}: {e}"
     ms = (time.perf_counter() - t0) * 1000
     return i, steps, even, odd, final, peak, ms
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def collatz_step_negative(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
@@ -220,6 +262,8 @@ def collatz_step_negative(n: int) -> tuple[int, bool]:
         r = (n << 1) + n + 1
         if r != 3 * n + 1: raise CalculationError(f"Mismatch in negative odd step on {n}: expected {3 * n + 1}, got {r}")
         return r, False
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def collatz_negative(n: int, verbose: bool = True, log_writer=None):
     if n == 0: raise InvalidInputError("0 is not a valid input for negative Collatz")
@@ -244,16 +288,22 @@ def collatz_negative(n: int, verbose: bool = True, log_writer=None):
     length = steps - entry_step
     raise CycleDetectedError(n, entry_step, length)
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def _bar(value: int, total: int, width: int = 12) -> str:
     filled = round(value / total * width) if total else 0
     filled = max(0, min(filled, width))
     return "█" * filled + "░" * (width - filled)
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def _format_large_number(n: int, max_len: int = 20) -> str:
     s = str(n)
     if len(s) <= max_len: return s
     exp = len(s) - 1
     return f"{s[0]}.{s[1:4]}e+{exp}"
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def reset_logs():
     try:
@@ -264,6 +314,8 @@ def reset_logs():
         log("INFO", "All log files have been deleted and directories recreated.", Fore.CYAN)
     except Exception as e:
         log("ERROR", f"Failed to reset logs: {e}", Fore.RED, exc_info=True)
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def test_powers():
     base = 2
@@ -346,18 +398,28 @@ def test_powers():
                     results = pool.map(_worker_power, batch_args)
                 except KeyboardInterrupt:
                     log("INFO", "Test interrupted by user", Fore.YELLOW)
+                    pool.terminate()
+                    pool.join()
                     interrupted = True
                     break
                 except Exception as e:
                     log("ERROR", f"Unexpected error in parallel execution: {e}", Fore.RED, exc_info=True)
+                    pool.terminate()
+                    pool.join()
                     interrupted = True
                     break
                 for res in results:
                     if len(res) == 7 and isinstance(res[6], str):
-                        idx, _, _, _, _, _, err_msg = res
-                        log("ERROR", f"{base}^{idx} - worker error: {err_msg}", Fore.RED)
-                        continue
-                    idx, steps, even, odd, final, peak, ms = res
+                        idx, steps, even, odd, final, peak, err_msg = res
+                        if err_msg == "INTERRUPTED":
+                            log("INFO", "Worker interrupted by user", Fore.YELLOW)
+                            interrupted = True
+                            break
+                        elif err_msg:
+                            log("ERROR", f"{base}^{idx} - worker error: {err_msg}", Fore.RED)
+                            continue
+                    else:
+                        idx, steps, even, odd, final, peak, ms = res
                     ok = (final == 1 and steps == idx and odd == 0) if verify_conditions else True
                     tot_steps += steps; tot_even += even; tot_odd += odd
                     if steps > max_steps: max_steps = steps
@@ -409,14 +471,20 @@ def test_powers():
                           f"{Fore.GREEN}✓{Style.RESET_ALL}")
                     _write_log("TEST", f"{base}^{idx} | steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
                     write_specific(f"{base}^{idx}: steps={steps} even={even} odd={odd} pct={pct:.1%} peak={peak} ms={ms:.3f}")
-                if interrupted: break
+                if interrupted:
+                    break
                 i += BATCH
         finally:
-            pool.terminate()
-            pool.join()
+            if 'pool' in locals():
+                pool.terminate()
+                pool.join()
     else:
         for i in range(1, 1_000_000_000):
-            n_orig = base ** i
+            try:
+                n_orig = base ** i
+            except OverflowError:
+                log("ERROR", f"Exponent {i} too large for base {base}", Fore.RED)
+                break
             t0 = time.perf_counter()
             try:
                 steps, even, odd, final, peak = collatz_superfast(n_orig)
@@ -501,6 +569,8 @@ def test_powers():
         f"Powers test of {base} complete — {counter} numbers tested, max steps: {max_steps}"
     )
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def read_integer(prompt: str) -> int:
     while True:
         try:
@@ -511,6 +581,8 @@ def read_integer(prompt: str) -> int:
             log("ERROR", f"Invalid input: {e}", Fore.RED)
         except KeyboardInterrupt:
             raise
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def manual_mode():
     try: x = read_integer(Fore.CYAN + "Enter an integer > 0: " + Style.RESET_ALL)
@@ -581,6 +653,8 @@ def manual_mode():
         f"Manual calculation done — n={x}  steps={steps}  peak={_format_large_number(peak, 20)}  time={elapsed:.3f}s"
     )
 
+# ────────────────────────────────────────────────────────────────────────────────
+
 def negative_mode():
     try:
         x = read_integer(Fore.CYAN + "Enter an integer (negative allowed, positive will be negated): " + Style.RESET_ALL)
@@ -634,12 +708,30 @@ def negative_mode():
     log("INFO", f"Detailed log saved to: {specific_log_path}", Fore.CYAN)
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
 
+# ────────────────────────────────────────────────────────────────────────────────
+
+def show_credits():
+    clear_screen()
+    print()
+    print(f"{_BOLD}{_PINK}{'=' * 50}{_RST}")
+    print(f"{_BOLD}{_PINK}              CREDITS{_RST}")
+    print(f"{_BOLD}{_PINK}{'=' * 50}{_RST}")
+    print()
+    print(f"{_CYAN}importsys{_RST} – part of the code, idea, design, etc.")
+    print(f"{_CYAN}DeepSeek & ChatGPT{_RST} – help in code and README.md writing,")
+    print(f"                    specifically grammar correction.")
+    print()
+    print(f"{_BOLD}{_PINK}{'=' * 50}{_RST}")
+    print()
+    wait_for_enter()
+
+# ────────────────────────────────────────────────────────────────────────────────
+
 _PINK   = "\033[38;5;213m"
 _CYAN   = "\033[36m"
 _DIM    = "\033[2m"
 _BOLD   = "\033[1m"
 _RST    = Style.RESET_ALL
-
 def draw_menu():
     clear_screen()
     print()
@@ -652,11 +744,14 @@ def draw_menu():
     print(f"  {_CYAN}2{_RST}. Powers test  ✦ parallel-ready")
     print(f"  {_CYAN}3{_RST}. Negative numbers  (cycle detection)")
     print(f"  {_CYAN}c{_RST}. Reset all logs (delete files)")
+    print(f"  {_CYAN}credits{_RST}. Show credits")
     print()
     print(f"  {_DIM}q{_RST}. Exit")
     print()
     print(f"{_BOLD}{_PINK}{'=' * 50}{_RST}")
     print()
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 def main():
     while True:
@@ -689,9 +784,15 @@ def main():
             else:
                 log("INFO", "Log reset cancelled.", Fore.CYAN)
             wait_for_enter()
+        elif c == "credits":
+            show_credits()
         else:
             log("ERROR", f"Invalid choice: '{c}'", Fore.RED)
             time.sleep(1)
+            
+# ────────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     main()
+
+# ────────────────────────────────────────────────────────────────────────────────
