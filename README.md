@@ -42,7 +42,7 @@ On macOS and Linux, the process is similar but uses the Terminal instead of Comm
 
 # Who am I?
 My online name is importsyss, I'm a Discord bot developer, turning 16 soon and a passionate about math, computer science and physics. My goals are to learn AI (ML, DL etc..) and become an AI engineer for some company and obviously solve math problems. I'm not an intelligent person or whatever, I only want to discover new math problems and resolve them. If you want a Discord bot contact me on Discord @importsyss.
-PS: I helped myself with DeepSeek and ChatGPT to make this project, only for the code (obviuosly i write some code), the rest of the ideas is provides by me.
+PS: I used DeepSeek and ChatGPT to help me write part of the code, but all the ideas and the overall design are my own. Also, since I'm from Italy and I'm still learning English, I used them to fix my grammar and improve the text.
 
 # Proofs
 Here are some photos about the number i mentioned up in this README.md
