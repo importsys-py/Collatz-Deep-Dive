@@ -45,8 +45,8 @@ My online name is importsyss, I'm a Discord bot developer, turning 16 soon and a
 PS: I used DeepSeek and ChatGPT to help me write part of the code, but all the ideas and the overall design are my own. Also, since I'm from Italy and I'm still learning English, I used them to fix my grammar and improve the text.
 
 # Proofs
-Here are some photos about the number i mentioned up in this README.md
+Here are some photos about the result of the number i mentioned up in this README.md
 
-![Begin](src\img\Screenshot.png)
-![Begin](src\img\Screenshot 2026-04-16 023834.png)
-![Begin](src\img\Screenshot 2026-04-16 023753.png)
+![Begin](src/img/Screenshot.png)
+![Begin](src/img/Screenshot_2026-04-16_023834.png)
+![Begin](src/img/Screenshot_2026-04-16_023753.png)
