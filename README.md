@@ -47,6 +47,6 @@ PS: I used DeepSeek and ChatGPT to help me write part of the code, but all the i
 # Proofs
 Here are some photos about the result of the number i mentioned up in this README.md
 
-![First screenshot](src/img/screenshot.png)
+![First screenshot](src/img/screenshot1.png)
 ![Second screenshot](src/img/screenshot2.png)
 ![Third screenshot](src/img/screenshot3.png)
