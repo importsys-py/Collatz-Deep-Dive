@@ -5,12 +5,11 @@ import time
 import multiprocessing
 import traceback
 import shutil
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from colorama import init, Fore, Style, Back
 import platform
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 init(autoreset=True)
 tz_rome   = ZoneInfo("Europe/Rome")
@@ -18,6 +17,7 @@ FMT       = "%d/%m/%Y %H:%M:%S.%f"
 LOGS_DIR      = "logs"
 RESULTS_DIR   = os.path.join(LOGS_DIR, "results")
 DEBUG_DIR     = os.path.join(LOGS_DIR, "debug")
+AI_TRAINING_FILE = os.path.join(LOGS_DIR, "ai_training.json")
 _SESSION_TIMESTAMP = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
 DEBUG_LOG_FILE = os.path.join(DEBUG_DIR, f"collatz_{_SESSION_TIMESTAMP}.log")
 _PLATFORM = platform.system()
@@ -38,35 +38,125 @@ for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
     except OSError:
         pass
 
-# ────────────────────────────────────────────────────────────────────────────────
+class SimpleCollatzAI:
+    def __init__(self):
+        self.prediction_cache = {}
+        self.learned_patterns = {
+            'power_of_2': {'steps': 0, 'even': 0, 'odd': 0},
+            'odd_multiplier': {'steps': 0, 'even': 0, 'odd': 0}
+        }
+        self.sample_count = 0
+        self.sum_steps_per_bit = 0.0
+        self.sum_peak_ratio = 0.0
+        self.sum_log_peak_ratio = 0.0
+
+    def predict_complexity(self, n: int) -> dict:
+        if n in self.prediction_cache:
+            return self.prediction_cache[n]
+        
+        predicted_steps = 0
+        predicted_peak = n
+        
+        if (n & (n - 1)) == 0:
+            predicted_steps = n.bit_length() - 1
+            predicted_peak = n
+        else:
+            bit_length = n.bit_length()
+            if self.sample_count >= 5:
+                avg_steps_per_bit = self.sum_steps_per_bit / self.sample_count
+                avg_peak_ratio = self.sum_peak_ratio / self.sample_count
+                predicted_steps = int(bit_length * avg_steps_per_bit)
+                predicted_peak = int(n * avg_peak_ratio)
+            else:
+                predicted_steps = int(bit_length * 5.5)
+                predicted_peak = n * (1 << (bit_length // 2))
+        
+        result = {
+            'steps': predicted_steps,
+            'peak': predicted_peak,
+            'complexity': 'simple' if predicted_steps < 50 else 'moderate' if predicted_steps < 200 else 'complex'
+        }
+        
+        self.prediction_cache[n] = result
+        
+        return result
+
+    def learn_from_result(self, n: int, steps: int, peak: int, even: int, odd: int):
+        if (n & (n - 1)) == 0:
+            self.learned_patterns['power_of_2']['steps'] = steps
+            self.learned_patterns['power_of_2']['even'] = even
+            self.learned_patterns['power_of_2']['odd'] = odd
+        else:
+            bit_len = n.bit_length()
+            self.learned_patterns['odd_multiplier']['steps'] = steps
+            self.learned_patterns['odd_multiplier']['even'] = even
+            self.learned_patterns['odd_multiplier']['odd'] = odd
+            if steps > 0 and bit_len > 0:
+                self.sum_steps_per_bit += steps / bit_len
+                self.sum_peak_ratio += peak / n
+                self.sum_log_peak_ratio += (peak.bit_length() - n.bit_length())
+                self.sample_count += 1
+        self.save_to_file()
+
+    def get_learning_stats(self) -> dict:
+        return {
+            'cache_size': len(self.prediction_cache),
+            'patterns': self.learned_patterns,
+            'trained_samples': self.sample_count
+        }
+
+    def save_to_file(self, filename: str = AI_TRAINING_FILE):
+        data = {
+            'prediction_cache': {str(k): v for k, v in self.prediction_cache.items()},
+            'learned_patterns': self.learned_patterns,
+            'sample_count': self.sample_count,
+            'sum_steps_per_bit': self.sum_steps_per_bit,
+            'sum_peak_ratio': self.sum_peak_ratio,
+            'sum_log_peak_ratio': self.sum_log_peak_ratio
+        }
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def load_from_file(self, filename: str = AI_TRAINING_FILE):
+        if not os.path.exists(filename):
+            return
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.prediction_cache = {int(k): v for k, v in data.get('prediction_cache', {}).items()}
+            self.learned_patterns = data.get('learned_patterns', self.learned_patterns)
+            self.sample_count = data.get('sample_count', 0)
+            self.sum_steps_per_bit = data.get('sum_steps_per_bit', 0.0)
+            self.sum_peak_ratio = data.get('sum_peak_ratio', 0.0)
+            self.sum_log_peak_ratio = data.get('sum_log_peak_ratio', 0.0)
+        except Exception:
+            pass
+
+collatz_ai = SimpleCollatzAI()
+collatz_ai.load_from_file()
 
 def _term_width() -> int:
     try:
         return max(40, shutil.get_terminal_size(fallback=(80, 24)).columns)
     except Exception:
         return 80
-    
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _box_width(min_width: int = 54, max_width: int = 100) -> int:
     width = _term_width() - 2
     return max(min_width, min(width, max_width))
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _line(char: str = "─", width: int | None = None) -> str:
     if width is None:
         width = _box_width()
     return char * max(0, width)
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 def _center(text: str, width: int | None = None) -> str:
     if width is None:
         width = _box_width()
     return text.center(width)
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _fit(text: str, width: int | None = None) -> str:
     if width is None:
@@ -76,8 +166,6 @@ def _fit(text: str, width: int | None = None) -> str:
     if width <= 1:
         return text[:width]
     return text[: max(0, width - 1)] + "…"
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _table_layout():
     width = _term_width()
@@ -89,18 +177,23 @@ def _table_layout():
         return dict(exp=8, steps=9, even=8, odd=7, pct=7, dist=20, peak=18, ms=8, ok=3)
     return dict(exp=7, steps=8, even=7, odd=7, pct=6, dist=16, peak=14, ms=7, ok=3)
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 class CalculationError(Exception): pass
 class InvalidInputError(ValueError): pass
+class AnomalyDetectedError(Exception):
+    def __init__(self, n: int, final: int, steps: int, peak: int, expected_final: int = 1):
+        self.n = n
+        self.final = final
+        self.steps = steps
+        self.peak = peak
+        self.expected_final = expected_final
+        super().__init__(f"Anomaly: n={n} ended at {final} (expected {expected_final})")
+
 class CycleDetectedError(Exception):
     def __init__(self, node: int, entry_step: int, length: int):
         self.node = node
         self.entry_step = entry_step
         self.length = length
         super().__init__(f"Cycle detected: re-entry at {node} at step {entry_step}, length={length}")
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _write_log(level: str, message: str, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
@@ -128,8 +221,6 @@ def _make_writer(path: str):
 
     return write_specific, f
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
     print(
@@ -139,15 +230,11 @@ def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
     )
     _write_log(level, message, exc_info)
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 def clear_screen():
     try:
         print("\033[2J\033[H", end="")
     except Exception:
         os.system("cls" if os.name == "nt" else "clear")
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def flush_input():
     try:
@@ -162,16 +249,12 @@ def flush_input():
         except Exception:
             pass
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 def wait_for_enter(prompt="\nPress Enter to continue..."):
     flush_input()
     try:
         input(prompt)
     except (EOFError, KeyboardInterrupt):
         pass
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def send_notification(title: str, message: str):
     try:
@@ -195,35 +278,16 @@ def send_notification(title: str, message: str):
     except Exception:
         pass
 
-# ────────────────────────────────────────────────────────────────────────────────
-
-def collatz_step(n: int) -> tuple[int, bool]:
-    if n & 1 == 0:
-        r = n >> 1
-        if r << 1 != n:
-            raise CalculationError(f"Reverse verification failed on {n}: expected {n}, got {r << 1}")
-        return r, True
-    r = (n << 1) + n + 1
-    if r & 1 != 0:
-        raise CalculationError(f"3*{n}+1 = {r} — expected even result, got odd")
-    return r, False
-
-# ────────────────────────────────────────────────────────────────────────────────
-
-def collatz_step_fast(n: int) -> tuple[int, bool]:
+def collatz_step_superfast(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
         return n >> 1, True
     return (n << 1) + n + 1, False
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def verify_counters(steps: int, even: int, odd: int):
     if even < 0 or odd < 0:
         raise CalculationError(f"Negative counter — even={even}, odd={odd}")
     if even + odd != steps:
         raise CalculationError(f"Incorrect counter sum — even({even}) + odd({odd}) = {even + odd}, expected {steps}")
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, progress_callback=None):
     if not isinstance(n, int) or n <= 0:
@@ -236,11 +300,7 @@ def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, p
         log("INFO", f"Starting Collatz with n = {n}", Fore.CYAN)
     while n > 1:
         old = n
-        try:
-            n, is_even = collatz_step(n)
-        except CalculationError as e:
-            log("CALCULATION ERROR", str(e), Fore.RED, exc_info=True)
-            raise
+        n, is_even = collatz_step_superfast(n)
         if n > peak:
             peak = n
         if is_even:
@@ -268,18 +328,22 @@ def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, p
                 pc(steps, even, odd, n, peak)
             except Exception:
                 pass
+    if n != 1:
+        raise AnomalyDetectedError(steps, n, steps, peak, 1)
+    if verbose:
+        print(f"{Fore.CYAN}{steps:04d}{Style.RESET_ALL} [{Fore.YELLOW}O{Style.RESET_ALL}] {Fore.WHITE}1{Style.RESET_ALL}")
     return steps, even, odd, n, peak
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callback=None):
+    if not verbose:
+        return collatz_superfast(n, progress_callback, log_writer)
     steps = even = odd = 0
     peak = n
     pc = progress_callback
     lw = log_writer
     while n > 1:
         old = n
-        n, is_even = collatz_step_fast(n)
+        n, is_even = collatz_step_superfast(n)
         if n > peak:
             peak = n
         if is_even:
@@ -300,9 +364,11 @@ def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callbac
                 pc(steps, even, odd, n, peak)
             except Exception:
                 pass
+    if n != 1:
+        raise AnomalyDetectedError(steps, n, steps, peak, 1)
+    if verbose:
+        print(f"{Fore.CYAN}{steps:04d}{Style.RESET_ALL} [{Fore.YELLOW}O{Style.RESET_ALL}] {Fore.WHITE}1{Style.RESET_ALL}")
     return steps, even, odd, n, peak
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def collatz_superfast(n: int, progress_callback=None, log_writer=None):
     steps = even = odd = 0
@@ -325,9 +391,9 @@ def collatz_superfast(n: int, progress_callback=None, log_writer=None):
                 pc(steps, even, odd, n, peak)
             except Exception:
                 pass
+    if n != 1:
+        raise AnomalyDetectedError(steps, n, steps, peak, 1)
     return steps, even, odd, n, peak
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
     steps = even = odd = 0
@@ -344,9 +410,9 @@ def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
             steps += 1
         if n > peak:
             peak = n
+    if n != 1:
+        raise AnomalyDetectedError(steps, n, steps, peak, 1)
     return steps, even, odd, n, peak
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _worker_power(args):
     i, n = args
@@ -355,12 +421,12 @@ def _worker_power(args):
         steps, even, odd, final, peak = _collatz_superfast_pure(n)
     except KeyboardInterrupt:
         return i, None, None, None, None, None, "INTERRUPTED"
+    except AnomalyDetectedError as e:
+        return i, 0, 0, 0, 0, 0, f"ANOMALY: final={e.final} expected={e.expected_final}"
     except Exception as e:
         return i, 0, 0, 0, 0, 0, f"{type(e).__name__}: {e}"
     ms = (time.perf_counter() - t0) * 1000
     return i, steps, even, odd, final, peak, ms
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def collatz_step_negative(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
@@ -372,8 +438,6 @@ def collatz_step_negative(n: int) -> tuple[int, bool]:
     if r != 3 * n + 1:
         raise CalculationError(f"Mismatch in negative odd step on {n}: expected {3 * n + 1}, got {r}")
     return r, False
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def collatz_negative(n: int, verbose: bool = True, log_writer=None):
     if n == 0:
@@ -403,14 +467,10 @@ def collatz_negative(n: int, verbose: bool = True, log_writer=None):
     length = steps - entry_step
     raise CycleDetectedError(n, entry_step, length)
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 def _bar(value: int, total: int, width: int = 12) -> str:
     filled = round(value / total * width) if total else 0
     filled = max(0, min(filled, width))
     return "█" * filled + "░" * (width - filled)
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def _format_large_number(n: int, max_len: int = 20) -> str:
     s = str(n)
@@ -418,8 +478,6 @@ def _format_large_number(n: int, max_len: int = 20) -> str:
         return s
     exp = len(s) - 1
     return f"{s[0]}.{s[1:4]}e+{exp}"
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def reset_logs():
     try:
@@ -430,8 +488,6 @@ def reset_logs():
         log("INFO", "All log files have been deleted and directories recreated.", Fore.CYAN)
     except Exception as e:
         log("ERROR", f"Failed to reset logs: {e}", Fore.RED, exc_info=True)
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def test_powers():
     base = 2
@@ -507,9 +563,11 @@ def test_powers():
     write_specific("")
 
     interrupted = False
+    anomalies = []
 
     def handle_anomaly(idx: int, final: int, steps: int, odd: int) -> bool:
         nonlocal interrupted
+        anomalies.append({'power': idx, 'final': final, 'steps': steps, 'odd': odd})
         log("ERROR", f"{base}^{idx} — unexpected result: final={final}, steps={steps}, odd={odd}", Fore.RED)
         _write_log("ERROR", f"{base}^{idx} | final={final} steps={steps} odd={odd}")
         write_specific(f"ANOMALY {base}^{idx}: final={final} steps={steps} odd={odd}")
@@ -517,6 +575,10 @@ def test_powers():
               f"  Final value    : {Fore.RED}{final}{Style.RESET_ALL}  (expected 1)\n"
               f"  Total steps    : {steps}  (expected {idx})\n  Odd steps      : {odd}  (expected 0)\n"
               f"{Fore.RED}{'─'*60}{Style.RESET_ALL}\n")
+        send_notification(
+            "Collatz Deep Drive - ANOMALY DETECTED",
+            f"Power {base}^{idx}: final={final} (expected 1), steps={steps}, odd={odd}"
+        )
         if auto_yes:
             print(f"  {Fore.YELLOW}Automatic continuation...{Style.RESET_ALL}")
             choice = "y"
@@ -631,6 +693,12 @@ def test_powers():
                             log("INFO", "Worker interrupted by user", Fore.YELLOW)
                             interrupted = True
                             break
+                        if "ANOMALY" in err_msg or "expected" in err_msg:
+                            collatz_ai.learn_from_result(base**idx, 0, 0, 0, 0)
+                            if not handle_anomaly(idx, peak if peak else 0, steps if steps else 0, odd if odd else 0):
+                                interrupted = True
+                                break
+                            continue
                         if err_msg:
                             log("ERROR", f"{base}^{idx} - worker error: {err_msg}", Fore.RED)
                             continue
@@ -639,6 +707,7 @@ def test_powers():
                     if not process_result(idx, steps, even, odd, final, peak, ms):
                         interrupted = True
                         break
+                    collatz_ai.learn_from_result(base**idx, steps, peak, even, odd)
                 if interrupted:
                     break
         finally:
@@ -661,6 +730,11 @@ def test_powers():
             except KeyboardInterrupt:
                 log("INFO", "Test interrupted by user", Fore.YELLOW)
                 break
+            except AnomalyDetectedError as e:
+                if not handle_anomaly(i, e.final, e.steps, 0):
+                    break
+                collatz_ai.learn_from_result(n_orig, e.steps, e.peak, 0, 0)
+                continue
             except Exception as e:
                 log("FATAL ERROR", f"{base}^{i}: {e}", Fore.RED, exc_info=True)
                 write_specific(f"FATAL ERROR {base}^{i}: {e}")
@@ -669,6 +743,7 @@ def test_powers():
             ms = (time.perf_counter() - t0) * 1000
             if not process_result(i, steps, even, odd, final, peak, ms):
                 break
+            collatz_ai.learn_from_result(n_orig, steps, peak, even, odd)
 
     print(sep)
     log("INFO", f"Numbers tested : {counter}", Fore.CYAN)
@@ -684,6 +759,13 @@ def test_powers():
     write_specific(f"Total odd      : {tot_odd}")
     write_specific(f"Max steps      : {max_steps}")
     write_specific(f"Absolute peak  : {max_peak}")
+    stats = collatz_ai.get_learning_stats()
+    write_specific(f"AI Cache size  : {stats['cache_size']}")
+    write_specific(f"AI Trained     : {stats.get('trained_samples', 0)} samples")
+    if anomalies:
+        write_specific(f"\n=== ANOMALIES ({len(anomalies)}) ===")
+        for anom in anomalies:
+            write_specific(f"Power {anom['power']}: final={anom['final']}, steps={anom['steps']}, odd={anom['odd']}")
     write_specific(f"Test ended     : {datetime.now(tz_rome).strftime(FMT)}")
     if specific_handle is not None:
         try:
@@ -692,12 +774,10 @@ def test_powers():
             pass
     log("INFO", f"Detailed log saved to: {specific_log_path}", Fore.CYAN)
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
-    send_notification(
-        "Collatz Deep Drive",
-        f"Powers test of {base} complete — {counter} numbers tested, max steps: {max_steps}"
-    )
-
-# ────────────────────────────────────────────────────────────────────────────────
+    notification_msg = f"Powers test of {base} complete — {counter} numbers tested, max steps: {max_steps}"
+    if anomalies:
+        notification_msg += f", {len(anomalies)} anomalies detected"
+    send_notification("Collatz Deep Drive", notification_msg)
 
 def read_integer(prompt: str) -> int:
     while True:
@@ -705,13 +785,31 @@ def read_integer(prompt: str) -> int:
             raw = input(prompt).strip().replace("_", "").replace(" ", "")
             if not raw:
                 raise InvalidInputError("Empty input")
-            return int(raw)
-        except (ValueError, InvalidInputError) as e:
+            
+            cleaned = ""
+            for char in raw:
+                if char.isdigit():
+                    cleaned += char
+                elif char not in "-+":
+                    log("ERROR", f"Invalid character '{char}' in input. Removing invalid characters.", Fore.YELLOW)
+            
+            if not cleaned:
+                raise InvalidInputError("No valid digits found in input")
+            
+            result = int(cleaned)
+            
+            if result <= 0:
+                log("ERROR", f"Number must be positive, got {result}", Fore.RED)
+                continue
+            
+            log("INFO", f"Input accepted: {result} ({len(str(result))} digits)", Fore.GREEN)
+            return result
+        except ValueError as e:
+            log("ERROR", f"Invalid input: {e}", Fore.RED)
+        except InvalidInputError as e:
             log("ERROR", f"Invalid input: {e}", Fore.RED)
         except KeyboardInterrupt:
             raise
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def manual_mode():
     try:
@@ -721,6 +819,10 @@ def manual_mode():
     if x <= 0:
         log("ERROR", f"Number must be > 0, got {x}", Fore.RED)
         return
+    
+    ai_prediction = collatz_ai.predict_complexity(x)
+    log("INFO", f"AI Prediction - Complexity: {ai_prediction['complexity']}, Est. Steps: {ai_prediction['steps']}", Fore.CYAN)
+    
     verbose = False
     if x > 10**4:
         try:
@@ -734,10 +836,19 @@ def manual_mode():
     specific_log_path = os.path.abspath(specific_log)
     write_specific, specific_handle = _make_writer(specific_log)
     write_specific(f"Manual calculation for n = {x} - started {datetime.now(tz_rome).strftime(FMT)}")
+    write_specific(f"AI Prediction: complexity={ai_prediction['complexity']}, est_steps={ai_prediction['steps']}")
     log_writer = write_specific if verbose else None
     t0 = time.perf_counter()
     try:
         steps, even, odd, final, peak = collatz_fast(x, verbose=verbose, log_writer=log_writer)
+    except AnomalyDetectedError as e:
+        log("ANOMALY DETECTED", f"Final value {e.final} instead of 1 - this violates Collatz conjecture!", Fore.RED, exc_info=True)
+        write_specific(f"ANOMALY: Final value {e.final} instead of 1")
+        send_notification(
+            "Collatz Deep Drive - CRITICAL ANOMALY",
+            f"Number {x} ended at {e.final} instead of 1! Possible counter-example to conjecture."
+        )
+        return
     except CalculationError as e:
         log("FATAL ERROR", f"Calculation interrupted due to arithmetic error: {e}", Fore.RED, exc_info=True)
         write_specific(f"FATAL ERROR: {e}")
@@ -762,6 +873,9 @@ def manual_mode():
     log("INFO", f"Final value : {final}", Fore.GREEN)
     log("INFO", f"Maximum peak: {peak}", Fore.MAGENTA)
     log("INFO", f"Elapsed time: {elapsed:.6f}s", Fore.GREEN)
+    if ai_prediction['steps'] > 0:
+        accuracy = (ai_prediction['steps'] - abs(steps - ai_prediction['steps'])) / ai_prediction['steps'] * 100
+        log("INFO", f"AI Prediction Accuracy: {accuracy:.1f}% (predicted {ai_prediction['steps']} steps)", Fore.CYAN)
     write_specific("\n=== RESULTS ===")
     write_specific(f"Total steps : {steps}")
     write_specific(f"Even steps  : {even}")
@@ -777,6 +891,7 @@ def manual_mode():
         log("ERROR", f"Final verification failed: {e}", Fore.RED)
         write_specific(f"Counter verification failed: {e}")
     write_specific(f"Calculation ended: {datetime.now(tz_rome).strftime(FMT)}")
+    collatz_ai.learn_from_result(x, steps, peak, even, odd)
     if specific_handle is not None:
         try:
             specific_handle.close()
@@ -788,8 +903,6 @@ def manual_mode():
         "Collatz Deep Drive",
         f"Manual calculation done — n={x}  steps={steps}  peak={_format_large_number(peak, 20)}  time={elapsed:.3f}s"
     )
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def negative_mode():
     try:
@@ -845,13 +958,11 @@ def negative_mode():
     log("INFO", f"Detailed log saved to: {specific_log_path}", Fore.CYAN)
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
 
-# ────────────────────────────────────────────────────────────────────────────────
-
 def show_credits():
     clear_screen()
     width = _box_width(54, 96)
     print()
-    print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")
+    print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")    
     print(f"{_BOLD}{_PINK_SOFT}{_center('CREDITS', width)}{_RST}")
     print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")
     print()
@@ -862,8 +973,6 @@ def show_credits():
     print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")
     print()
     wait_for_enter()
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def draw_menu():
     clear_screen()
@@ -888,8 +997,6 @@ def draw_menu():
     print()
     print(f"{_BLACK_BG}{_BOLD}{_PINK_DARK}{'═' * width}{_RST}")
     print()
-
-# ────────────────────────────────────────────────────────────────────────────────
 
 def main():
     while True:
@@ -927,10 +1034,6 @@ def main():
         else:
             log("ERROR", f"Invalid choice: '{c}'", Fore.RED)
             time.sleep(1)
-            
-# ────────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     main()
-
-# ────────────────────────────────────────────────────────────────────────────────
