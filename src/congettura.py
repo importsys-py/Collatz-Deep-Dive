@@ -1,5 +1,7 @@
 import sys
 sys.set_int_max_str_digits(0)
+import math
+from collections import OrderedDict, defaultdict
 import os
 import time
 import multiprocessing
@@ -16,12 +18,22 @@ import platform
 init(autoreset=True)
 tz_rome   = ZoneInfo("Europe/Rome")
 FMT       = "%d/%m/%Y %H:%M:%S.%f"
-LOGS_DIR      = "logs"
+
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if os.path.basename(_CURRENT_DIR).lower() == "src":
+    _PROJECT_ROOT = os.path.dirname(_CURRENT_DIR)
+else:
+    _PROJECT_ROOT = _CURRENT_DIR
+
+LOGS_DIR      = os.path.join(_PROJECT_ROOT, "logs")
 RESULTS_DIR   = os.path.join(LOGS_DIR, "results")
 DEBUG_DIR     = os.path.join(LOGS_DIR, "debug")
-AI_TRAINING_FILE = os.path.join(LOGS_DIR, "ai_training.json")
+AI_TRAINING_FILE = os.path.join(LOGS_DIR, "ai", "ai_training.json")
+
 _SESSION_TIMESTAMP = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
 DEBUG_LOG_FILE = os.path.join(DEBUG_DIR, f"collatz_{_SESSION_TIMESTAMP}.log")
+
 _PLATFORM = platform.system()
 _CPU_COUNT = max(1, (os.cpu_count() or 1) - 1)
 
@@ -34,7 +46,7 @@ _BOLD = Style.BRIGHT
 _RST = Style.RESET_ALL
 _BLACK_BG = Back.BLACK
 
-for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
+for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR, os.path.dirname(AI_TRAINING_FILE)]:
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -43,104 +55,540 @@ for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 class SimpleCollatzAI:
-    def __init__(self):
-        self.prediction_cache = {}
-        self.learned_patterns = {
-            'power_of_2': {'steps': 0, 'even': 0, 'odd': 0},
-            'odd_multiplier': {'steps': 0, 'even': 0, 'odd': 0}
-        }
-        self.sample_count = 0
+    class _OnlineStats:
+        __slots__ = ("count", "mean", "m2", "min", "max")
+
+        def __init__(self):
+            self.count = 0
+            self.mean = 0.0
+            self.m2 = 0.0
+            self.min = float("inf")
+            self.max = float("-inf")
+
+        def update(self, value: float):
+            x = float(value)
+            self.count += 1
+            delta = x - self.mean
+            self.mean += delta / self.count
+            delta2 = x - self.mean
+            self.m2 += delta * delta2
+            if x < self.min:
+                self.min = x
+            if x > self.max:
+                self.max = x
+
+        @property
+        def variance(self) -> float:
+            return self.m2 / (self.count - 1) if self.count > 1 else 0.0
+
+        @property
+        def std(self) -> float:
+            return math.sqrt(self.variance)
+
+        def to_dict(self) -> dict:
+            return {
+                "count": self.count,
+                "mean": self.mean,
+                "m2": self.m2,
+                "min": self.min,
+                "max": self.max,
+            }
+
+        @classmethod
+        def from_dict(cls, data: dict):
+            obj = cls()
+            if not isinstance(data, dict):
+                return obj
+            obj.count = int(data.get("count", 0) or 0)
+            obj.mean = float(data.get("mean", 0.0) or 0.0)
+            obj.m2 = float(data.get("m2", 0.0) or 0.0)
+            obj.min = float(data.get("min", float("inf")) or float("inf"))
+            obj.max = float(data.get("max", float("-inf")) or float("-inf"))
+            return obj
+
+    def __init__(self, cache_size: int = 4096):
+        self.max_cache_size = max(256, int(cache_size))
+        self.model_revision = 0
+        self.prediction_cache = OrderedDict()
+
+        self.training_samples = 0
         self.sum_steps_per_bit = 0.0
         self.sum_peak_ratio = 0.0
         self.sum_log_peak_ratio = 0.0
 
-    def predict_complexity(self, n: int) -> dict:
-        if n in self.prediction_cache:
-            return self.prediction_cache[n]
-        
-        predicted_steps = 0
-        predicted_peak = n
-        
-        if (n & (n - 1)) == 0:
-            predicted_steps = n.bit_length() - 1
-            predicted_peak = n
-        else:
-            bit_length = n.bit_length()
-            if self.sample_count >= 5:
-                avg_steps_per_bit = self.sum_steps_per_bit / self.sample_count
-                avg_peak_ratio = self.sum_peak_ratio / self.sample_count
-                predicted_steps = int(bit_length * avg_steps_per_bit)
-                predicted_peak = int(n * avg_peak_ratio)
-            else:
-                predicted_steps = int(bit_length * 5.5)
-                predicted_peak = n * (1 << (bit_length // 2))
-        
-        result = {
-            'steps': predicted_steps,
-            'peak': predicted_peak,
-            'complexity': 'simple' if predicted_steps < 50 else 'moderate' if predicted_steps < 200 else 'complex'
+        self.steps_per_bit_stats = self._OnlineStats()
+        self.peak_log_ratio_stats = self._OnlineStats()
+        self.step_residual_stats = self._OnlineStats()
+        self.peak_residual_stats = self._OnlineStats()
+
+        self.step_bucket_stats = {
+            "bitlen": defaultdict(self._new_stats),
+            "residue8": defaultdict(self._new_stats),
+            "tz": defaultdict(self._new_stats),
+            "popbin": defaultdict(self._new_stats),
         }
-        
-        self.prediction_cache[n] = result
-        
-        return result
+        self.peak_bucket_stats = {
+            "bitlen": defaultdict(self._new_stats),
+            "residue8": defaultdict(self._new_stats),
+            "tz": defaultdict(self._new_stats),
+            "popbin": defaultdict(self._new_stats),
+        }
+
+        self.step_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.peak_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+        self.learned_patterns = {
+            "power_of_2": {
+                "samples": 0,
+                "steps": 0.0,
+                "even": 0.0,
+                "odd": 0.0,
+                "peak_ratio": 1.0,
+                "steps_per_bit": 0.0,
+            },
+            "odd_multiplier": {
+                "samples": 0,
+                "steps": 0.0,
+                "even": 0.0,
+                "odd": 0.0,
+                "peak_ratio": 0.0,
+                "steps_per_bit": 0.0,
+            },
+        }
+
+    def _new_stats(self):
+        return self._OnlineStats()
+
+    @staticmethod
+    def _is_power_of_two(n: int) -> bool:
+        return n > 0 and (n & (n - 1)) == 0
+
+    @staticmethod
+    def _clip(value: float, low: float, high: float) -> float:
+        return low if value < low else high if value > high else value
+
+    @staticmethod
+    def _safe_log2(n: int) -> float:
+        if n <= 0:
+            return 0.0
+        try:
+            return math.log2(n)
+        except (OverflowError, ValueError):
+            return float(n.bit_length() - 1)
+
+    @staticmethod
+    def _dot(weights, features) -> float:
+        return sum(w * x for w, x in zip(weights, features))
+
+    def _popbin(self, n: int) -> int:
+        bitlen = max(1, n.bit_length())
+        return min(12, (n.bit_count() * 12) // bitlen)
+
+    def _tz(self, n: int) -> int:
+        return (n & -n).bit_length() - 1 if n > 0 else 0
+
+    def _features(self, n: int) -> list[float]:
+        log_n = self._safe_log2(n)
+        pop_ratio = n.bit_count() / max(1, n.bit_length())
+        tz_norm = min(self._tz(n), 64) / 64.0
+        residue_norm = (n & 7) / 7.0
+        popbin_norm = self._popbin(n) / 12.0
+        return [1.0, log_n, pop_ratio, tz_norm, residue_norm, popbin_norm]
+
+    def _bucket_weight(self, stat: "SimpleCollatzAI._OnlineStats") -> float:
+        if stat.count <= 0:
+            return 0.0
+        spread = 1.0 / (1.0 + stat.std)
+        return (1.0 + math.log1p(stat.count)) * spread
+
+    def _blend(self, candidates: list[float], weights: list[float], fallback: float) -> float:
+        total = 0.0
+        acc = 0.0
+        for c, w in zip(candidates, weights):
+            if w > 0:
+                total += w
+                acc += c * w
+        if total <= 0:
+            return fallback
+        return acc / total
+
+    def _predict_steps_raw(self, n: int) -> tuple[float, float]:
+        bitlen = max(1, n.bit_length())
+        popbin = self._popbin(n)
+        residue = n & 7
+        tz = self._tz(n)
+        features = self._features(n)
+
+        fallback_spb = self.learned_patterns["odd_multiplier"]["steps_per_bit"] if self.learned_patterns["odd_multiplier"]["samples"] else 5.5
+        global_fallback = self.steps_per_bit_stats.mean if self.steps_per_bit_stats.count else fallback_spb
+
+        candidates = []
+        weights = []
+
+        candidates.append(global_fallback * bitlen)
+        weights.append(1.0 + math.log1p(self.steps_per_bit_stats.count) if self.steps_per_bit_stats.count else 0.5)
+
+        for bucket_name, key, scale in (
+            ("bitlen", bitlen, bitlen),
+            ("residue8", residue, bitlen),
+            ("tz", min(32, tz), bitlen),
+            ("popbin", popbin, bitlen),
+        ):
+            stat = self.step_bucket_stats[bucket_name].get(key)
+            if stat and stat.count:
+                candidates.append(stat.mean * scale)
+                weights.append(self._bucket_weight(stat))
+
+        if self.training_samples >= 8:
+            linear = self._dot(self.step_weights, features)
+            candidates.append(max(1.0, linear))
+            weights.append(0.75 + min(2.0, math.log1p(self.training_samples) / 2.0))
+
+        prediction = self._blend(candidates, weights, fallback_spb * bitlen)
+        confidence = self._estimate_confidence(self.step_residual_stats, prediction)
+        return prediction, confidence
+
+    def _predict_peak_ratio_log2_raw(self, n: int) -> tuple[float, float]:
+        popbin = self._popbin(n)
+        residue = n & 7
+        tz = self._tz(n)
+        features = self._features(n)
+
+        fallback_ratio = self.learned_patterns["odd_multiplier"]["peak_ratio"] if self.learned_patterns["odd_multiplier"]["samples"] else 0.0
+        global_fallback = self.peak_log_ratio_stats.mean if self.peak_log_ratio_stats.count else fallback_ratio
+
+        candidates = []
+        weights = []
+
+        candidates.append(global_fallback)
+        weights.append(1.0 + math.log1p(self.peak_log_ratio_stats.count) if self.peak_log_ratio_stats.count else 0.4)
+
+        for bucket_name, key in (
+            ("bitlen", max(1, n.bit_length())),
+            ("residue8", residue),
+            ("tz", min(32, tz)),
+            ("popbin", popbin),
+        ):
+            stat = self.peak_bucket_stats[bucket_name].get(key)
+            if stat and stat.count:
+                candidates.append(stat.mean)
+                weights.append(self._bucket_weight(stat))
+
+        if self.training_samples >= 8:
+            linear = self._dot(self.peak_weights, features)
+            candidates.append(linear)
+            weights.append(0.75 + min(2.0, math.log1p(self.training_samples) / 2.0))
+
+        prediction = self._blend(candidates, weights, global_fallback)
+        prediction = max(0.0, prediction)
+        confidence = self._estimate_confidence(self.peak_residual_stats, prediction)
+        return prediction, confidence
+
+    def _estimate_confidence(self, residual_stats: "SimpleCollatzAI._OnlineStats", predicted_value: float) -> float:
+        if residual_stats.count <= 2:
+            base = 0.25 + min(0.35, self.training_samples / 100.0)
+            return self._clip(base, 0.1, 0.85)
+        spread = residual_stats.std
+        denom = max(1.0, abs(predicted_value))
+        rel = spread / denom
+        confidence = 1.0 / (1.0 + rel)
+        return self._clip(confidence, 0.08, 0.99)
+
+    def _update_mean_record(self, record: dict, steps: int, even: int, odd: int, peak_ratio: float, steps_per_bit: float):
+        samples = int(record.get("samples", 0) or 0) + 1
+        record["samples"] = samples
+        record["steps"] = float(record.get("steps", 0.0)) + (steps - float(record.get("steps", 0.0))) / samples
+        record["even"] = float(record.get("even", 0.0)) + (even - float(record.get("even", 0.0))) / samples
+        record["odd"] = float(record.get("odd", 0.0)) + (odd - float(record.get("odd", 0.0))) / samples
+        record["peak_ratio"] = float(record.get("peak_ratio", 0.0)) + (peak_ratio - float(record.get("peak_ratio", 0.0))) / samples
+        record["steps_per_bit"] = float(record.get("steps_per_bit", 0.0)) + (steps_per_bit - float(record.get("steps_per_bit", 0.0))) / samples
+
+    def _update_bucket(self, target_map: dict, key: int, value: float):
+        target_map[key].update(value)
+
+    def _invalidate_cache(self):
+        self.prediction_cache.clear()
+        self.model_revision += 1
+
+    def _trim_cache(self):
+        while len(self.prediction_cache) > self.max_cache_size:
+            self.prediction_cache.popitem(last=False)
+
+    def predict_complexity(self, n: int) -> dict:
+        if not isinstance(n, int) or n <= 0:
+            raise ValueError(f"Invalid input for prediction: {n!r}")
+
+        cached = self.prediction_cache.get(n)
+        if cached and cached[0] == self.model_revision:
+            return dict(cached[1])
+
+        bitlen = max(1, n.bit_length())
+
+        if self._is_power_of_two(n):
+            steps = bitlen - 1
+            peak = n
+            result = {
+                "steps": steps,
+                "peak": peak,
+                "confidence": 1.0,
+                "complexity": "simple",
+                "method": "exact_power_of_two",
+            }
+            self.prediction_cache[n] = (self.model_revision, result)
+            self._trim_cache()
+            return dict(result)
+
+        predicted_steps, steps_conf = self._predict_steps_raw(n)
+        peak_extra_log2, peak_conf = self._predict_peak_ratio_log2_raw(n)
+
+        predicted_steps = max(1.0, predicted_steps)
+        step_int = int(round(predicted_steps))
+
+        log_n = self._safe_log2(n)
+        delta_bits = max(0.0, peak_extra_log2)
+        approx_peak_log2 = log_n + delta_bits
+        approx_peak = n << max(0, int(round(delta_bits)))
+
+        confidence = round((steps_conf * 0.65) + (peak_conf * 0.35), 4)
+        if step_int < 50:
+            complexity = "simple"
+        elif step_int < 200:
+            complexity = "moderate"
+        else:
+            complexity = "complex"
+
+        result = {
+            "steps": step_int,
+            "peak": int(approx_peak),
+            "confidence": confidence,
+            "complexity": complexity,
+            "method": "adaptive_ensemble_v2",
+            "predicted_steps_raw": round(predicted_steps, 3),
+            "predicted_peak_log2": round(approx_peak_log2, 3),
+        }
+
+        self.prediction_cache[n] = (self.model_revision, result)
+        self._trim_cache()
+        return dict(result)
 
     def learn_from_result(self, n: int, steps: int, peak: int, even: int, odd: int):
-        if (n & (n - 1)) == 0:
-            self.learned_patterns['power_of_2']['steps'] = steps
-            self.learned_patterns['power_of_2']['even'] = even
-            self.learned_patterns['power_of_2']['odd'] = odd
+        if not isinstance(n, int) or n <= 0:
+            return
+        if steps < 0 or even < 0 or odd < 0 or peak <= 0:
+            return
+
+        log_n = self._safe_log2(n)
+        bitlen = max(1, n.bit_length())
+        steps_per_bit = steps / bitlen
+        peak_ratio = peak / n if n else 0.0
+        peak_log_ratio = self._safe_log2(peak) - log_n if peak > 0 and n > 0 else 0.0
+
+        prediction = self.predict_complexity(n)
+        predicted_steps = float(prediction.get("steps", 0))
+        predicted_peak_log2 = float(prediction.get("predicted_peak_log2", log_n))
+        predicted_peak_extra = predicted_peak_log2 - log_n
+
+        self.training_samples += 1
+        self.sum_steps_per_bit += steps_per_bit
+        self.sum_peak_ratio += peak_ratio
+        self.sum_log_peak_ratio += peak_log_ratio
+
+        self.steps_per_bit_stats.update(steps_per_bit)
+        self.peak_log_ratio_stats.update(peak_log_ratio)
+
+        self._update_bucket(self.step_bucket_stats["bitlen"], bitlen, steps_per_bit)
+        self._update_bucket(self.step_bucket_stats["residue8"], n & 7, steps_per_bit)
+        self._update_bucket(self.step_bucket_stats["tz"], min(32, self._tz(n)), steps_per_bit)
+        self._update_bucket(self.step_bucket_stats["popbin"], self._popbin(n), steps_per_bit)
+
+        self._update_bucket(self.peak_bucket_stats["bitlen"], bitlen, peak_log_ratio)
+        self._update_bucket(self.peak_bucket_stats["residue8"], n & 7, peak_log_ratio)
+        self._update_bucket(self.peak_bucket_stats["tz"], min(32, self._tz(n)), peak_log_ratio)
+        self._update_bucket(self.peak_bucket_stats["popbin"], self._popbin(n), peak_log_ratio)
+
+        self.step_residual_stats.update(steps - predicted_steps)
+        self.peak_residual_stats.update(peak_log_ratio - predicted_peak_extra)
+
+        if self._is_power_of_two(n):
+            self._update_mean_record(
+                self.learned_patterns["power_of_2"],
+                steps,
+                even,
+                odd,
+                peak_ratio,
+                steps_per_bit,
+            )
         else:
-            bit_len = n.bit_length()
-            self.learned_patterns['odd_multiplier']['steps'] = steps
-            self.learned_patterns['odd_multiplier']['even'] = even
-            self.learned_patterns['odd_multiplier']['odd'] = odd
-            if steps > 0 and bit_len > 0:
-                self.sum_steps_per_bit += steps / bit_len
-                self.sum_peak_ratio += peak / n
-                self.sum_log_peak_ratio += (peak.bit_length() - n.bit_length())
-                self.sample_count += 1
-        self.save_to_file()
+            self._update_mean_record(
+                self.learned_patterns["odd_multiplier"],
+                steps,
+                even,
+                odd,
+                peak_ratio,
+                steps_per_bit,
+            )
+
+        features = self._features(n)
+        lr = 0.03 / math.sqrt(self.training_samples + 1.0)
+
+        step_pred = self._dot(self.step_weights, features)
+        step_error = steps - step_pred
+        for i, x in enumerate(features):
+            self.step_weights[i] += lr * step_error * x
+            self.step_weights[i] = self._clip(self.step_weights[i], -1e4, 1e4)
+
+        peak_pred = self._dot(self.peak_weights, features)
+        peak_error = peak_log_ratio - peak_pred
+        for i, x in enumerate(features):
+            self.peak_weights[i] += lr * peak_error * x
+            self.peak_weights[i] = self._clip(self.peak_weights[i], -1e4, 1e4)
+
+        self._invalidate_cache()
 
     def get_learning_stats(self) -> dict:
         return {
-            'cache_size': len(self.prediction_cache),
-            'patterns': self.learned_patterns,
-            'trained_samples': self.sample_count
+            "cache_size": len(self.prediction_cache),
+            "trained_samples": self.training_samples,
+            "model_revision": self.model_revision,
+            "patterns": self.learned_patterns,
+            "global_step_mean_per_bit": self.steps_per_bit_stats.mean if self.steps_per_bit_stats.count else None,
+            "global_peak_log2_mean": self.peak_log_ratio_stats.mean if self.peak_log_ratio_stats.count else None,
+            "step_residual_std": self.step_residual_stats.std if self.step_residual_stats.count else None,
+            "peak_residual_std": self.peak_residual_stats.std if self.peak_residual_stats.count else None,
         }
 
-    def save_to_file(self, filename: str = AI_TRAINING_FILE):
+    def _serialize_bucket_maps(self, bucket_maps: dict) -> dict:
+        return {
+            group: {str(key): stat.to_dict() for key, stat in mapping.items()}
+            for group, mapping in bucket_maps.items()
+        }
+
+    def _deserialize_bucket_maps(self, data: dict) -> dict:
+        out = {
+            "bitlen": defaultdict(self._new_stats),
+            "residue8": defaultdict(self._new_stats),
+            "tz": defaultdict(self._new_stats),
+            "popbin": defaultdict(self._new_stats),
+        }
+        if not isinstance(data, dict):
+            return out
+        for group in out.keys():
+            mapping = data.get(group, {})
+            if not isinstance(mapping, dict):
+                continue
+            for key, stat_data in mapping.items():
+                try:
+                    ikey = int(key)
+                except Exception:
+                    continue
+                out[group][ikey] = self._OnlineStats.from_dict(stat_data)
+        return out
+
+    def save_to_file(self, filename: str = None):
+        if filename is None:
+            filename = globals().get("AI_TRAINING_FILE", "ai_training.json")
+
         data = {
-            'prediction_cache': {str(k): v for k, v in self.prediction_cache.items()},
-            'learned_patterns': self.learned_patterns,
-            'sample_count': self.sample_count,
-            'sum_steps_per_bit': self.sum_steps_per_bit,
-            'sum_peak_ratio': self.sum_peak_ratio,
-            'sum_log_peak_ratio': self.sum_log_peak_ratio
+            "model_version": 2,
+            "model_revision": self.model_revision,
+            "prediction_cache": {str(k): v[1] for k, v in self.prediction_cache.items()},
+            "learned_patterns": self.learned_patterns,
+            "sample_count": self.training_samples,
+            "training_samples": self.training_samples,
+            "sum_steps_per_bit": self.sum_steps_per_bit,
+            "sum_peak_ratio": self.sum_peak_ratio,
+            "sum_log_peak_ratio": self.sum_log_peak_ratio,
+            "global_step_stats": self.steps_per_bit_stats.to_dict(),
+            "global_peak_stats": self.peak_log_ratio_stats.to_dict(),
+            "step_residual_stats": self.step_residual_stats.to_dict(),
+            "peak_residual_stats": self.peak_residual_stats.to_dict(),
+            "step_bucket_stats": self._serialize_bucket_maps(self.step_bucket_stats),
+            "peak_bucket_stats": self._serialize_bucket_maps(self.peak_bucket_stats),
+            "step_weights": self.step_weights,
+            "peak_weights": self.peak_weights,
         }
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
 
-    def load_from_file(self, filename: str = AI_TRAINING_FILE):
+    def load_from_file(self, filename: str = None):
+        if filename is None:
+            filename = globals().get("AI_TRAINING_FILE", "ai_training.json")
+
         if not os.path.exists(filename):
             return
+
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
+            with open(filename, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self.prediction_cache = {int(k): v for k, v in data.get('prediction_cache', {}).items()}
-            self.learned_patterns = data.get('learned_patterns', self.learned_patterns)
-            self.sample_count = data.get('sample_count', 0)
-            self.sum_steps_per_bit = data.get('sum_steps_per_bit', 0.0)
-            self.sum_peak_ratio = data.get('sum_peak_ratio', 0.0)
-            self.sum_log_peak_ratio = data.get('sum_log_peak_ratio', 0.0)
+
+            self.model_revision = int(data.get("model_revision", 0) or 0)
+            self.training_samples = int(data.get("training_samples", data.get("sample_count", 0)) or 0)
+            self.sum_steps_per_bit = float(data.get("sum_steps_per_bit", 0.0) or 0.0)
+            self.sum_peak_ratio = float(data.get("sum_peak_ratio", 0.0) or 0.0)
+            self.sum_log_peak_ratio = float(data.get("sum_log_peak_ratio", 0.0) or 0.0)
+
+            defaults = {
+                "power_of_2": {
+                    "samples": 0,
+                    "steps": 0.0,
+                    "even": 0.0,
+                    "odd": 0.0,
+                    "peak_ratio": 1.0,
+                    "steps_per_bit": 0.0,
+                },
+                "odd_multiplier": {
+                    "samples": 0,
+                    "steps": 0.0,
+                    "even": 0.0,
+                    "odd": 0.0,
+                    "peak_ratio": 0.0,
+                    "steps_per_bit": 0.0,
+                },
+            }
+
+            loaded_patterns = data.get("learned_patterns", {})
+            if isinstance(loaded_patterns, dict):
+                self.learned_patterns = loaded_patterns
+            else:
+                self.learned_patterns = defaults
+
+            for key, dflt in defaults.items():
+                self.learned_patterns.setdefault(key, {})
+                for subkey, subval in dflt.items():
+                    self.learned_patterns[key].setdefault(subkey, subval)
+
+            self.steps_per_bit_stats = self._OnlineStats.from_dict(data.get("global_step_stats", {}))
+            self.peak_log_ratio_stats = self._OnlineStats.from_dict(data.get("global_peak_stats", {}))
+            self.step_residual_stats = self._OnlineStats.from_dict(data.get("step_residual_stats", {}))
+            self.peak_residual_stats = self._OnlineStats.from_dict(data.get("peak_residual_stats", {}))
+
+            self.step_bucket_stats = self._deserialize_bucket_maps(data.get("step_bucket_stats", {}))
+            self.peak_bucket_stats = self._deserialize_bucket_maps(data.get("peak_bucket_stats", {}))
+
+            step_weights = data.get("step_weights", self.step_weights)
+            peak_weights = data.get("peak_weights", self.peak_weights)
+            if isinstance(step_weights, list) and len(step_weights) == 6:
+                self.step_weights = [float(x) for x in step_weights]
+            if isinstance(peak_weights, list) and len(peak_weights) == 6:
+                self.peak_weights = [float(x) for x in peak_weights]
+
+            cache = data.get("prediction_cache", {})
+            self.prediction_cache = OrderedDict()
+            if isinstance(cache, dict):
+                for k, v in cache.items():
+                    try:
+                        nk = int(k)
+                    except Exception:
+                        continue
+                    if isinstance(v, dict):
+                        self.prediction_cache[nk] = (self.model_revision, v)
+            self._trim_cache()
+
         except Exception:
             pass
-
-collatz_ai = SimpleCollatzAI()
-collatz_ai.load_from_file()
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -291,11 +739,24 @@ def wait_for_enter(prompt="\nPress Enter to continue..."):
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def send_notification(title: str, message: str):
+    def _clip(text: str, limit: int) -> str:
+        text = str(text)
+        if len(text) <= limit:
+            return text
+        if limit <= 1:
+            return text[:limit]
+        return text[:limit - 1] + "…"
+
     try:
         if _PLATFORM == "Windows":
             try:
                 from plyer import notification
-                notification.notify(title=title, message=message, app_name="Collatz Deep Drive", timeout=8)
+                notification.notify(
+                    title=_clip(title, 64),
+                    message=_clip(message, 256),
+                    app_name=_clip("Collatz Deep Drive", 64),
+                    timeout=8
+                )
                 return
             except ImportError:
                 pass
@@ -541,7 +1002,7 @@ def reset_logs():
     try:
         if os.path.exists(LOGS_DIR):
             shutil.rmtree(LOGS_DIR)
-        for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
+        for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR, os.path.dirname(AI_TRAINING_FILE)]:
             os.makedirs(d, exist_ok=True)
         log("INFO", "All log files have been deleted and directories recreated.", Fore.CYAN)
     except Exception as e:
@@ -754,7 +1215,7 @@ def test_powers():
                             interrupted = True
                             break
                         if "ANOMALY" in err_msg or "expected" in err_msg:
-                            collatz_ai.learn_from_result(base**idx, 0, 0, 0, 0)
+                            collatz.learn_from_result(base**idx, 0, 0, 0, 0)
                             if not handle_anomaly(idx, peak if peak else 0, steps if steps else 0, odd if odd else 0):
                                 interrupted = True
                                 break
@@ -767,7 +1228,7 @@ def test_powers():
                     if not process_result(idx, steps, even, odd, final, peak, ms):
                         interrupted = True
                         break
-                    collatz_ai.learn_from_result(base**idx, steps, peak, even, odd)
+                    collatz.learn_from_result(base**idx, steps, peak, even, odd)
                 if interrupted:
                     break
         finally:
@@ -793,7 +1254,7 @@ def test_powers():
             except AnomalyDetectedError as e:
                 if not handle_anomaly(i, e.final, e.steps, 0):
                     break
-                collatz_ai.learn_from_result(n_orig, e.steps, e.peak, 0, 0)
+                collatz.learn_from_result(n_orig, e.steps, e.peak, 0, 0)
                 continue
             except Exception as e:
                 log("FATAL ERROR", f"{base}^{i}: {e}", Fore.RED, exc_info=True)
@@ -803,7 +1264,7 @@ def test_powers():
             ms = (time.perf_counter() - t0) * 1000
             if not process_result(i, steps, even, odd, final, peak, ms):
                 break
-            collatz_ai.learn_from_result(n_orig, steps, peak, even, odd)
+            collatz.learn_from_result(n_orig, steps, peak, even, odd)
 
     print(sep)
     log("INFO", f"Numbers tested : {counter}", Fore.CYAN)
@@ -819,7 +1280,7 @@ def test_powers():
     write_specific(f"Total odd      : {tot_odd}")
     write_specific(f"Max steps      : {max_steps}")
     write_specific(f"Absolute peak  : {max_peak}")
-    stats = collatz_ai.get_learning_stats()
+    stats = collatz.get_learning_stats()
     write_specific(f"AI Cache size  : {stats['cache_size']}")
     write_specific(f"AI Trained     : {stats.get('trained_samples', 0)} samples")
     if anomalies:
@@ -884,7 +1345,7 @@ def manual_mode():
         log("ERROR", f"Number must be > 0, got {x}", Fore.RED)
         return
     
-    ai_prediction = collatz_ai.predict_complexity(x)
+    ai_prediction = collatz.predict_complexity(x)
     log("INFO", f"AI Prediction - Complexity: {ai_prediction['complexity']}, Est. Steps: {ai_prediction['steps']}", Fore.CYAN)
     
     verbose = False
@@ -955,7 +1416,7 @@ def manual_mode():
         log("ERROR", f"Final verification failed: {e}", Fore.RED)
         write_specific(f"Counter verification failed: {e}")
     write_specific(f"Calculation ended: {datetime.now(tz_rome).strftime(FMT)}")
-    collatz_ai.learn_from_result(x, steps, peak, even, odd)
+    collatz.learn_from_result(x, steps, peak, even, odd)
     if specific_handle is not None:
         try:
             specific_handle.close()
