@@ -590,6 +590,9 @@ class SimpleCollatzAI:
         except Exception:
             pass
 
+collatz_ai = SimpleCollatzAI(cache_size=4096)
+collatz_ai.load_from_file()
+
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def _term_width() -> int:
@@ -1215,7 +1218,7 @@ def test_powers():
                             interrupted = True
                             break
                         if "ANOMALY" in err_msg or "expected" in err_msg:
-                            collatz.learn_from_result(base**idx, 0, 0, 0, 0)
+                            collatz_ai.learn_from_result(base**idx, 0, 0, 0, 0)
                             if not handle_anomaly(idx, peak if peak else 0, steps if steps else 0, odd if odd else 0):
                                 interrupted = True
                                 break
@@ -1228,7 +1231,7 @@ def test_powers():
                     if not process_result(idx, steps, even, odd, final, peak, ms):
                         interrupted = True
                         break
-                    collatz.learn_from_result(base**idx, steps, peak, even, odd)
+                    collatz_ai.learn_from_result(base**idx, steps, peak, even, odd)
                 if interrupted:
                     break
         finally:
@@ -1254,7 +1257,7 @@ def test_powers():
             except AnomalyDetectedError as e:
                 if not handle_anomaly(i, e.final, e.steps, 0):
                     break
-                collatz.learn_from_result(n_orig, e.steps, e.peak, 0, 0)
+                collatz_ai.learn_from_result(n_orig, e.steps, e.peak, 0, 0)
                 continue
             except Exception as e:
                 log("FATAL ERROR", f"{base}^{i}: {e}", Fore.RED, exc_info=True)
@@ -1264,7 +1267,7 @@ def test_powers():
             ms = (time.perf_counter() - t0) * 1000
             if not process_result(i, steps, even, odd, final, peak, ms):
                 break
-            collatz.learn_from_result(n_orig, steps, peak, even, odd)
+            collatz_ai.learn_from_result(n_orig, steps, peak, even, odd)
 
     print(sep)
     log("INFO", f"Numbers tested : {counter}", Fore.CYAN)
@@ -1280,7 +1283,7 @@ def test_powers():
     write_specific(f"Total odd      : {tot_odd}")
     write_specific(f"Max steps      : {max_steps}")
     write_specific(f"Absolute peak  : {max_peak}")
-    stats = collatz.get_learning_stats()
+    stats = collatz_ai.get_learning_stats()
     write_specific(f"AI Cache size  : {stats['cache_size']}")
     write_specific(f"AI Trained     : {stats.get('trained_samples', 0)} samples")
     if anomalies:
@@ -1345,7 +1348,7 @@ def manual_mode():
         log("ERROR", f"Number must be > 0, got {x}", Fore.RED)
         return
     
-    ai_prediction = collatz.predict_complexity(x)
+    ai_prediction = collatz_ai.predict_complexity(x)
     log("INFO", f"AI Prediction - Complexity: {ai_prediction['complexity']}, Est. Steps: {ai_prediction['steps']}", Fore.CYAN)
     
     verbose = False
@@ -1416,7 +1419,7 @@ def manual_mode():
         log("ERROR", f"Final verification failed: {e}", Fore.RED)
         write_specific(f"Counter verification failed: {e}")
     write_specific(f"Calculation ended: {datetime.now(tz_rome).strftime(FMT)}")
-    collatz.learn_from_result(x, steps, peak, even, odd)
+    collatz_ai.learn_from_result(x, steps, peak, even, odd)
     if specific_handle is not None:
         try:
             specific_handle.close()
