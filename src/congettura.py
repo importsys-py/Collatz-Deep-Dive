@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 from colorama import init, Fore, Style, Back
 import platform
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 init(autoreset=True)
 tz_rome   = ZoneInfo("Europe/Rome")
 FMT       = "%d/%m/%Y %H:%M:%S.%f"
@@ -37,6 +39,8 @@ for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR]:
         os.makedirs(d, exist_ok=True)
     except OSError:
         pass
+    
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 class SimpleCollatzAI:
     def __init__(self):
@@ -138,25 +142,35 @@ class SimpleCollatzAI:
 collatz_ai = SimpleCollatzAI()
 collatz_ai.load_from_file()
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def _term_width() -> int:
     try:
         return max(40, shutil.get_terminal_size(fallback=(80, 24)).columns)
     except Exception:
         return 80
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def _box_width(min_width: int = 54, max_width: int = 100) -> int:
     width = _term_width() - 2
     return max(min_width, min(width, max_width))
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def _line(char: str = "─", width: int | None = None) -> str:
     if width is None:
         width = _box_width()
     return char * max(0, width)
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def _center(text: str, width: int | None = None) -> str:
     if width is None:
         width = _box_width()
     return text.center(width)
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def _fit(text: str, width: int | None = None) -> str:
     if width is None:
@@ -167,6 +181,8 @@ def _fit(text: str, width: int | None = None) -> str:
         return text[:width]
     return text[: max(0, width - 1)] + "…"
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def _table_layout():
     width = _term_width()
     if width >= 140:
@@ -176,6 +192,8 @@ def _table_layout():
     if width >= 100:
         return dict(exp=8, steps=9, even=8, odd=7, pct=7, dist=20, peak=18, ms=8, ok=3)
     return dict(exp=7, steps=8, even=7, odd=7, pct=6, dist=16, peak=14, ms=7, ok=3)
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 class CalculationError(Exception): pass
 class InvalidInputError(ValueError): pass
@@ -188,12 +206,16 @@ class AnomalyDetectedError(Exception):
         self.expected_final = expected_final
         super().__init__(f"Anomaly: n={n} ended at {final} (expected {expected_final})")
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 class CycleDetectedError(Exception):
     def __init__(self, node: int, entry_step: int, length: int):
         self.node = node
         self.entry_step = entry_step
         self.length = length
         super().__init__(f"Cycle detected: re-entry at {node} at step {entry_step}, length={length}")
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def _write_log(level: str, message: str, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
@@ -204,6 +226,8 @@ def _write_log(level: str, message: str, exc_info: bool = False):
                 f.write(traceback.format_exc())
     except (OSError, IOError):
         pass
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def _make_writer(path: str):
     try:
@@ -221,6 +245,8 @@ def _make_writer(path: str):
 
     return write_specific, f
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
     print(
@@ -230,11 +256,15 @@ def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
     )
     _write_log(level, message, exc_info)
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def clear_screen():
     try:
         print("\033[2J\033[H", end="")
     except Exception:
         os.system("cls" if os.name == "nt" else "clear")
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def flush_input():
     try:
@@ -249,12 +279,16 @@ def flush_input():
         except Exception:
             pass
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def wait_for_enter(prompt="\nPress Enter to continue..."):
     flush_input()
     try:
         input(prompt)
     except (EOFError, KeyboardInterrupt):
         pass
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def send_notification(title: str, message: str):
     try:
@@ -278,16 +312,22 @@ def send_notification(title: str, message: str):
     except Exception:
         pass
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def collatz_step_superfast(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
         return n >> 1, True
     return (n << 1) + n + 1, False
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def verify_counters(steps: int, even: int, odd: int):
     if even < 0 or odd < 0:
         raise CalculationError(f"Negative counter — even={even}, odd={odd}")
     if even + odd != steps:
         raise CalculationError(f"Incorrect counter sum — even({even}) + odd({odd}) = {even + odd}, expected {steps}")
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, progress_callback=None):
     if not isinstance(n, int) or n <= 0:
@@ -334,6 +374,8 @@ def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, p
         print(f"{Fore.CYAN}{steps:04d}{Style.RESET_ALL} [{Fore.YELLOW}O{Style.RESET_ALL}] {Fore.WHITE}1{Style.RESET_ALL}")
     return steps, even, odd, n, peak
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callback=None):
     if not verbose:
         return collatz_superfast(n, progress_callback, log_writer)
@@ -370,6 +412,8 @@ def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callbac
         print(f"{Fore.CYAN}{steps:04d}{Style.RESET_ALL} [{Fore.YELLOW}O{Style.RESET_ALL}] {Fore.WHITE}1{Style.RESET_ALL}")
     return steps, even, odd, n, peak
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def collatz_superfast(n: int, progress_callback=None, log_writer=None):
     steps = even = odd = 0
     peak = n
@@ -395,6 +439,8 @@ def collatz_superfast(n: int, progress_callback=None, log_writer=None):
         raise AnomalyDetectedError(steps, n, steps, peak, 1)
     return steps, even, odd, n, peak
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
     steps = even = odd = 0
     peak = n
@@ -414,6 +460,8 @@ def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
         raise AnomalyDetectedError(steps, n, steps, peak, 1)
     return steps, even, odd, n, peak
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def _worker_power(args):
     i, n = args
     t0 = time.perf_counter()
@@ -428,6 +476,8 @@ def _worker_power(args):
     ms = (time.perf_counter() - t0) * 1000
     return i, steps, even, odd, final, peak, ms
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def collatz_step_negative(n: int) -> tuple[int, bool]:
     if n & 1 == 0:
         r = n >> 1
@@ -438,6 +488,8 @@ def collatz_step_negative(n: int) -> tuple[int, bool]:
     if r != 3 * n + 1:
         raise CalculationError(f"Mismatch in negative odd step on {n}: expected {3 * n + 1}, got {r}")
     return r, False
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def collatz_negative(n: int, verbose: bool = True, log_writer=None):
     if n == 0:
@@ -467,10 +519,14 @@ def collatz_negative(n: int, verbose: bool = True, log_writer=None):
     length = steps - entry_step
     raise CycleDetectedError(n, entry_step, length)
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def _bar(value: int, total: int, width: int = 12) -> str:
     filled = round(value / total * width) if total else 0
     filled = max(0, min(filled, width))
     return "█" * filled + "░" * (width - filled)
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def _format_large_number(n: int, max_len: int = 20) -> str:
     s = str(n)
@@ -478,6 +534,8 @@ def _format_large_number(n: int, max_len: int = 20) -> str:
         return s
     exp = len(s) - 1
     return f"{s[0]}.{s[1:4]}e+{exp}"
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def reset_logs():
     try:
@@ -488,6 +546,8 @@ def reset_logs():
         log("INFO", "All log files have been deleted and directories recreated.", Fore.CYAN)
     except Exception as e:
         log("ERROR", f"Failed to reset logs: {e}", Fore.RED, exc_info=True)
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def test_powers():
     base = 2
@@ -779,6 +839,8 @@ def test_powers():
         notification_msg += f", {len(anomalies)} anomalies detected"
     send_notification("Collatz Deep Drive", notification_msg)
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def read_integer(prompt: str) -> int:
     while True:
         try:
@@ -810,6 +872,8 @@ def read_integer(prompt: str) -> int:
             log("ERROR", f"Invalid input: {e}", Fore.RED)
         except KeyboardInterrupt:
             raise
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def manual_mode():
     try:
@@ -904,6 +968,8 @@ def manual_mode():
         f"Manual calculation done — n={x}  steps={steps}  peak={_format_large_number(peak, 20)}  time={elapsed:.3f}s"
     )
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def negative_mode():
     try:
         x = read_integer(Fore.CYAN + "Enter an integer (negative allowed, positive will be negated): " + Style.RESET_ALL)
@@ -958,6 +1024,8 @@ def negative_mode():
     log("INFO", f"Detailed log saved to: {specific_log_path}", Fore.CYAN)
     print(f"{Fore.CYAN}→ Log file path: {specific_log_path}{Style.RESET_ALL}")
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def show_credits():
     clear_screen()
     width = _box_width(54, 96)
@@ -973,6 +1041,8 @@ def show_credits():
     print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")
     print()
     wait_for_enter()
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def draw_menu():
     clear_screen()
@@ -997,6 +1067,8 @@ def draw_menu():
     print()
     print(f"{_BLACK_BG}{_BOLD}{_PINK_DARK}{'═' * width}{_RST}")
     print()
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def main():
     while True:
@@ -1035,5 +1107,9 @@ def main():
             log("ERROR", f"Invalid choice: '{c}'", Fore.RED)
             time.sleep(1)
 
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     main()
+    
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
