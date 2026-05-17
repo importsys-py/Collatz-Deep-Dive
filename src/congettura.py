@@ -8,10 +8,23 @@ import multiprocessing
 import traceback
 import shutil
 import json
+import gc
+import atexit
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from colorama import init, Fore, Style, Back
 import platform
+import warnings
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
+    from matplotlib.gridspec import GridSpec
+    _MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    _MATPLOTLIB_AVAILABLE = False
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -26,52 +39,61 @@ if os.path.basename(_CURRENT_DIR).lower() == "src":
 else:
     _PROJECT_ROOT = _CURRENT_DIR
 
-LOGS_DIR      = os.path.join(_PROJECT_ROOT, "logs")
-RESULTS_DIR   = os.path.join(LOGS_DIR, "results")
-DEBUG_DIR     = os.path.join(LOGS_DIR, "debug")
+LOGS_DIR         = os.path.join(_PROJECT_ROOT, "logs")
+RESULTS_DIR      = os.path.join(LOGS_DIR, "results")
+DEBUG_DIR        = os.path.join(LOGS_DIR, "debug")
+GRAPHS_DIR       = os.path.join(LOGS_DIR, "graphs")
 AI_TRAINING_FILE = os.path.join(LOGS_DIR, "ai", "ai_training.json")
 
 _SESSION_TIMESTAMP = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
 DEBUG_LOG_FILE = os.path.join(DEBUG_DIR, f"collatz_{_SESSION_TIMESTAMP}.log")
 
-_PLATFORM = platform.system()
+_PLATFORM  = platform.system()
 _CPU_COUNT = max(1, (os.cpu_count() or 1) - 1)
 
-_PINK = "\033[38;5;213m"
+_PINK      = "\033[38;5;213m"
 _PINK_SOFT = "\033[38;5;218m"
 _PINK_DARK = "\033[38;5;198m"
-_CYAN = Fore.CYAN
-_DIM = Style.DIM
-_BOLD = Style.BRIGHT
-_RST = Style.RESET_ALL
-_BLACK_BG = Back.BLACK
+_CYAN      = Fore.CYAN
+_DIM       = Style.DIM
+_BOLD      = Style.BRIGHT
+_RST       = Style.RESET_ALL
+_BLACK_BG  = Back.BLACK
 
-for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR, os.path.dirname(AI_TRAINING_FILE)]:
+_MAX_TRACE_STEPS   = 5_000_000
+_MAX_GRAPH_SAMPLES = 100_000
+_GRAPH_WARN_STEPS  = 500_000
+
+for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR, GRAPHS_DIR, os.path.dirname(AI_TRAINING_FILE)]:
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
         pass
-    
+
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 class SimpleCollatzAI:
+    _FEATURE_DIM  = 8
+    _MODEL_VERSION = 3
+    _MOMENTUM_BETA = 0.9
+
     class _OnlineStats:
         __slots__ = ("count", "mean", "m2", "min", "max")
 
         def __init__(self):
             self.count = 0
-            self.mean = 0.0
-            self.m2 = 0.0
-            self.min = float("inf")
-            self.max = float("-inf")
+            self.mean  = 0.0
+            self.m2    = 0.0
+            self.min   = float("inf")
+            self.max   = float("-inf")
 
         def update(self, value: float):
             x = float(value)
             self.count += 1
-            delta = x - self.mean
-            self.mean += delta / self.count
-            delta2 = x - self.mean
-            self.m2 += delta * delta2
+            delta       = x - self.mean
+            self.mean  += delta / self.count
+            delta2      = x - self.mean
+            self.m2    += delta * delta2
             if x < self.min:
                 self.min = x
             if x > self.max:
@@ -88,10 +110,10 @@ class SimpleCollatzAI:
         def to_dict(self) -> dict:
             return {
                 "count": self.count,
-                "mean": self.mean,
-                "m2": self.m2,
-                "min": self.min,
-                "max": self.max,
+                "mean":  self.mean,
+                "m2":    self.m2,
+                "min":   self.min,
+                "max":   self.max,
             }
 
         @classmethod
@@ -99,60 +121,57 @@ class SimpleCollatzAI:
             obj = cls()
             if not isinstance(data, dict):
                 return obj
-            obj.count = int(data.get("count", 0) or 0)
-            obj.mean = float(data.get("mean", 0.0) or 0.0)
-            obj.m2 = float(data.get("m2", 0.0) or 0.0)
-            obj.min = float(data.get("min", float("inf")) or float("inf"))
-            obj.max = float(data.get("max", float("-inf")) or float("-inf"))
+            obj.count = int(data.get("count", 0)              or 0)
+            obj.mean  = float(data.get("mean",  0.0)          or 0.0)
+            obj.m2    = float(data.get("m2",    0.0)          or 0.0)
+            obj.min   = float(data.get("min",   float("inf")) or float("inf"))
+            obj.max   = float(data.get("max",   float("-inf"))or float("-inf"))
             return obj
 
     def __init__(self, cache_size: int = 4096):
         self.max_cache_size = max(256, int(cache_size))
         self.model_revision = 0
-        self.prediction_cache = OrderedDict()
+        self.prediction_cache: OrderedDict = OrderedDict()
 
-        self.training_samples = 0
-        self.sum_steps_per_bit = 0.0
-        self.sum_peak_ratio = 0.0
-        self.sum_log_peak_ratio = 0.0
+        self.training_samples    = 0
+        self.sum_steps_per_bit   = 0.0
+        self.sum_peak_ratio      = 0.0
+        self.sum_log_peak_ratio  = 0.0
 
-        self.steps_per_bit_stats = self._OnlineStats()
+        self.steps_per_bit_stats  = self._OnlineStats()
         self.peak_log_ratio_stats = self._OnlineStats()
-        self.step_residual_stats = self._OnlineStats()
-        self.peak_residual_stats = self._OnlineStats()
+        self.step_residual_stats  = self._OnlineStats()
+        self.peak_residual_stats  = self._OnlineStats()
+        self.odd_ratio_stats      = self._OnlineStats()
 
         self.step_bucket_stats = {
-            "bitlen": defaultdict(self._new_stats),
+            "bitlen":   defaultdict(self._new_stats),
             "residue8": defaultdict(self._new_stats),
-            "tz": defaultdict(self._new_stats),
-            "popbin": defaultdict(self._new_stats),
+            "tz":       defaultdict(self._new_stats),
+            "popbin":   defaultdict(self._new_stats),
+            "residue3": defaultdict(self._new_stats),
         }
         self.peak_bucket_stats = {
-            "bitlen": defaultdict(self._new_stats),
+            "bitlen":   defaultdict(self._new_stats),
             "residue8": defaultdict(self._new_stats),
-            "tz": defaultdict(self._new_stats),
-            "popbin": defaultdict(self._new_stats),
+            "tz":       defaultdict(self._new_stats),
+            "popbin":   defaultdict(self._new_stats),
+            "residue3": defaultdict(self._new_stats),
         }
 
-        self.step_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.peak_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.step_weights   = [0.0] * self._FEATURE_DIM
+        self.peak_weights   = [0.0] * self._FEATURE_DIM
+        self.step_momentum  = [0.0] * self._FEATURE_DIM
+        self.peak_momentum  = [0.0] * self._FEATURE_DIM
 
         self.learned_patterns = {
             "power_of_2": {
-                "samples": 0,
-                "steps": 0.0,
-                "even": 0.0,
-                "odd": 0.0,
-                "peak_ratio": 1.0,
-                "steps_per_bit": 0.0,
+                "samples": 0, "steps": 0.0, "even": 0.0, "odd": 0.0,
+                "peak_ratio": 1.0, "steps_per_bit": 0.0,
             },
             "odd_multiplier": {
-                "samples": 0,
-                "steps": 0.0,
-                "even": 0.0,
-                "odd": 0.0,
-                "peak_ratio": 0.0,
-                "steps_per_bit": 0.0,
+                "samples": 0, "steps": 0.0, "even": 0.0, "odd": 0.0,
+                "peak_ratio": 0.0, "steps_per_bit": 0.0,
             },
         }
 
@@ -187,13 +206,20 @@ class SimpleCollatzAI:
     def _tz(self, n: int) -> int:
         return (n & -n).bit_length() - 1 if n > 0 else 0
 
-    def _features(self, n: int) -> list[float]:
-        log_n = self._safe_log2(n)
-        pop_ratio = n.bit_count() / max(1, n.bit_length())
-        tz_norm = min(self._tz(n), 64) / 64.0
-        residue_norm = (n & 7) / 7.0
-        popbin_norm = self._popbin(n) / 12.0
-        return [1.0, log_n, pop_ratio, tz_norm, residue_norm, popbin_norm]
+    def _features(self, n: int) -> list:
+        bitlen     = max(1, n.bit_length())
+        log_n      = self._safe_log2(n)
+        pop_count  = n.bit_count()
+        pop_ratio  = pop_count / bitlen
+        tz_raw     = self._tz(n)
+        tz_norm    = min(tz_raw, 64) / 64.0
+        residue7   = (n & 7) / 7.0
+        residue3   = (n % 3) / 2.0
+        popbin_n   = self._popbin(n) / 12.0
+        inv_tz     = 1.0 / (1.0 + min(tz_raw, 64))
+        log_n_norm = min(log_n, 2000.0) / 2000.0
+        cross      = pop_ratio * tz_norm
+        return [1.0, log_n_norm, pop_ratio, tz_norm, residue7, residue3, popbin_n, cross]
 
     def _bucket_weight(self, stat: "SimpleCollatzAI._OnlineStats") -> float:
         if stat.count <= 0:
@@ -201,38 +227,36 @@ class SimpleCollatzAI:
         spread = 1.0 / (1.0 + stat.std)
         return (1.0 + math.log1p(stat.count)) * spread
 
-    def _blend(self, candidates: list[float], weights: list[float], fallback: float) -> float:
-        total = 0.0
-        acc = 0.0
+    def _blend(self, candidates: list, weights: list, fallback: float) -> float:
+        total = acc = 0.0
         for c, w in zip(candidates, weights):
             if w > 0:
                 total += w
-                acc += c * w
-        if total <= 0:
-            return fallback
-        return acc / total
+                acc   += c * w
+        return acc / total if total > 0 else fallback
 
-    def _predict_steps_raw(self, n: int) -> tuple[float, float]:
-        bitlen = max(1, n.bit_length())
-        popbin = self._popbin(n)
-        residue = n & 7
-        tz = self._tz(n)
+    def _predict_steps_raw(self, n: int) -> tuple:
+        bitlen   = max(1, n.bit_length())
+        popbin   = self._popbin(n)
+        residue  = n & 7
+        residue3 = n % 3
+        tz       = self._tz(n)
         features = self._features(n)
 
-        fallback_spb = self.learned_patterns["odd_multiplier"]["steps_per_bit"] if self.learned_patterns["odd_multiplier"]["samples"] else 5.5
+        fallback_spb    = self.learned_patterns["odd_multiplier"]["steps_per_bit"] if self.learned_patterns["odd_multiplier"]["samples"] else 5.5
         global_fallback = self.steps_per_bit_stats.mean if self.steps_per_bit_stats.count else fallback_spb
 
-        candidates = []
-        weights = []
+        candidates, weights = [], []
 
         candidates.append(global_fallback * bitlen)
         weights.append(1.0 + math.log1p(self.steps_per_bit_stats.count) if self.steps_per_bit_stats.count else 0.5)
 
         for bucket_name, key, scale in (
-            ("bitlen", bitlen, bitlen),
-            ("residue8", residue, bitlen),
-            ("tz", min(32, tz), bitlen),
-            ("popbin", popbin, bitlen),
+            ("bitlen",   bitlen,          bitlen),
+            ("residue8", residue,         bitlen),
+            ("tz",       min(32, tz),     bitlen),
+            ("popbin",   popbin,          bitlen),
+            ("residue3", residue3,        bitlen),
         ):
             stat = self.step_bucket_stats[bucket_name].get(key)
             if stat and stat.count:
@@ -248,26 +272,27 @@ class SimpleCollatzAI:
         confidence = self._estimate_confidence(self.step_residual_stats, prediction)
         return prediction, confidence
 
-    def _predict_peak_ratio_log2_raw(self, n: int) -> tuple[float, float]:
-        popbin = self._popbin(n)
-        residue = n & 7
-        tz = self._tz(n)
+    def _predict_peak_ratio_log2_raw(self, n: int) -> tuple:
+        popbin   = self._popbin(n)
+        residue  = n & 7
+        residue3 = n % 3
+        tz       = self._tz(n)
         features = self._features(n)
 
-        fallback_ratio = self.learned_patterns["odd_multiplier"]["peak_ratio"] if self.learned_patterns["odd_multiplier"]["samples"] else 0.0
+        fallback_ratio  = self.learned_patterns["odd_multiplier"]["peak_ratio"] if self.learned_patterns["odd_multiplier"]["samples"] else 0.0
         global_fallback = self.peak_log_ratio_stats.mean if self.peak_log_ratio_stats.count else fallback_ratio
 
-        candidates = []
-        weights = []
+        candidates, weights = [], []
 
         candidates.append(global_fallback)
         weights.append(1.0 + math.log1p(self.peak_log_ratio_stats.count) if self.peak_log_ratio_stats.count else 0.4)
 
         for bucket_name, key in (
-            ("bitlen", max(1, n.bit_length())),
+            ("bitlen",   max(1, n.bit_length())),
             ("residue8", residue),
-            ("tz", min(32, tz)),
-            ("popbin", popbin),
+            ("tz",       min(32, tz)),
+            ("popbin",   popbin),
+            ("residue3", residue3),
         ):
             stat = self.peak_bucket_stats[bucket_name].get(key)
             if stat and stat.count:
@@ -289,19 +314,67 @@ class SimpleCollatzAI:
             base = 0.25 + min(0.35, self.training_samples / 100.0)
             return self._clip(base, 0.1, 0.85)
         spread = residual_stats.std
-        denom = max(1.0, abs(predicted_value))
-        rel = spread / denom
+        denom  = max(1.0, abs(predicted_value))
+        rel    = spread / denom
         confidence = 1.0 / (1.0 + rel)
         return self._clip(confidence, 0.08, 0.99)
+
+    def predict_final_confidence(self, n: int) -> float:
+        if self._is_power_of_two(n):
+            return 1.0
+        if self.training_samples < 10:
+            return 0.85
+
+        pred      = self.predict_complexity(n)
+        step_conf = pred.get("confidence", 0.5)
+
+        tz        = self._tz(n)
+        tz_bonus  = min(0.08, tz * 0.008)
+
+        pop_ratio   = n.bit_count() / max(1, n.bit_length())
+        pop_penalty = max(0.0, pop_ratio - 0.8) * 0.15
+
+        residue3_bonus = 0.02 if (n % 3 == 0) else 0.0
+
+        base = self._clip(step_conf * 0.75 + 0.18 + tz_bonus - pop_penalty + residue3_bonus, 0.50, 0.9999)
+        return round(base, 4)
+
+    def predict_trajectory(self, n: int) -> dict:
+        pred = self.predict_complexity(n)
+
+        pattern = self.learned_patterns["odd_multiplier"]
+        if pattern["samples"] > 0 and pattern["steps"] > 0:
+            learned_odd_ratio = pattern["odd"] / max(1.0, pattern["steps"])
+        else:
+            learned_odd_ratio = 1.0 / 3.0
+
+        predicted_steps = pred["steps"]
+        predicted_odd   = max(1, round(predicted_steps * learned_odd_ratio))
+        predicted_even  = predicted_steps - predicted_odd
+
+        peak_frac            = 0.25 if self.odd_ratio_stats.count < 5 else self._clip(self.odd_ratio_stats.mean * 0.6, 0.1, 0.5)
+        predicted_peak_step  = max(1, round(predicted_steps * peak_frac))
+
+        final_confidence = self.predict_final_confidence(n)
+
+        return {
+            "predicted_steps":      predicted_steps,
+            "predicted_even":       predicted_even,
+            "predicted_odd":        predicted_odd,
+            "predicted_odd_ratio":  round(learned_odd_ratio, 4),
+            "predicted_peak_step":  predicted_peak_step,
+            "final_confidence":     final_confidence,
+            "complexity":           pred["complexity"],
+        }
 
     def _update_mean_record(self, record: dict, steps: int, even: int, odd: int, peak_ratio: float, steps_per_bit: float):
         samples = int(record.get("samples", 0) or 0) + 1
         record["samples"] = samples
-        record["steps"] = float(record.get("steps", 0.0)) + (steps - float(record.get("steps", 0.0))) / samples
-        record["even"] = float(record.get("even", 0.0)) + (even - float(record.get("even", 0.0))) / samples
-        record["odd"] = float(record.get("odd", 0.0)) + (odd - float(record.get("odd", 0.0))) / samples
-        record["peak_ratio"] = float(record.get("peak_ratio", 0.0)) + (peak_ratio - float(record.get("peak_ratio", 0.0))) / samples
-        record["steps_per_bit"] = float(record.get("steps_per_bit", 0.0)) + (steps_per_bit - float(record.get("steps_per_bit", 0.0))) / samples
+        record["steps"]        = float(record.get("steps",        0.0)) + (steps        - float(record.get("steps",        0.0))) / samples
+        record["even"]         = float(record.get("even",         0.0)) + (even         - float(record.get("even",         0.0))) / samples
+        record["odd"]          = float(record.get("odd",          0.0)) + (odd          - float(record.get("odd",          0.0))) / samples
+        record["peak_ratio"]   = float(record.get("peak_ratio",   0.0)) + (peak_ratio   - float(record.get("peak_ratio",   0.0))) / samples
+        record["steps_per_bit"]= float(record.get("steps_per_bit",0.0)) + (steps_per_bit- float(record.get("steps_per_bit",0.0))) / samples
 
     def _update_bucket(self, target_map: dict, key: int, value: float):
         target_map[key].update(value)
@@ -325,29 +398,29 @@ class SimpleCollatzAI:
         bitlen = max(1, n.bit_length())
 
         if self._is_power_of_two(n):
-            steps = bitlen - 1
-            peak = n
+            steps  = bitlen - 1
+            peak   = n
             result = {
-                "steps": steps,
-                "peak": peak,
+                "steps":      steps,
+                "peak":       peak,
                 "confidence": 1.0,
                 "complexity": "simple",
-                "method": "exact_power_of_two",
+                "method":     "exact_power_of_two",
             }
             self.prediction_cache[n] = (self.model_revision, result)
             self._trim_cache()
             return dict(result)
 
         predicted_steps, steps_conf = self._predict_steps_raw(n)
-        peak_extra_log2, peak_conf = self._predict_peak_ratio_log2_raw(n)
+        peak_extra_log2, peak_conf  = self._predict_peak_ratio_log2_raw(n)
 
         predicted_steps = max(1.0, predicted_steps)
-        step_int = int(round(predicted_steps))
+        step_int        = int(round(predicted_steps))
 
-        log_n = self._safe_log2(n)
-        delta_bits = max(0.0, peak_extra_log2)
+        log_n          = self._safe_log2(n)
+        delta_bits     = max(0.0, peak_extra_log2)
         approx_peak_log2 = log_n + delta_bits
-        approx_peak = n << max(0, int(round(delta_bits)))
+        approx_peak    = n << max(0, int(round(delta_bits)))
 
         confidence = round((steps_conf * 0.65) + (peak_conf * 0.35), 4)
         if step_int < 50:
@@ -358,11 +431,11 @@ class SimpleCollatzAI:
             complexity = "complex"
 
         result = {
-            "steps": step_int,
-            "peak": int(approx_peak),
-            "confidence": confidence,
-            "complexity": complexity,
-            "method": "adaptive_ensemble_v2",
+            "steps":               step_int,
+            "peak":                int(approx_peak),
+            "confidence":          confidence,
+            "complexity":          complexity,
+            "method":              "adaptive_ensemble_v3",
             "predicted_steps_raw": round(predicted_steps, 3),
             "predicted_peak_log2": round(approx_peak_log2, 3),
         }
@@ -377,84 +450,82 @@ class SimpleCollatzAI:
         if steps < 0 or even < 0 or odd < 0 or peak <= 0:
             return
 
-        log_n = self._safe_log2(n)
-        bitlen = max(1, n.bit_length())
-        steps_per_bit = steps / bitlen
-        peak_ratio = peak / n if n else 0.0
+        log_n          = self._safe_log2(n)
+        bitlen         = max(1, n.bit_length())
+        steps_per_bit  = steps / bitlen
+        peak_ratio     = peak / n if n else 0.0
         peak_log_ratio = self._safe_log2(peak) - log_n if peak > 0 and n > 0 else 0.0
+        odd_ratio      = odd / max(1, steps)
 
-        prediction = self.predict_complexity(n)
-        predicted_steps = float(prediction.get("steps", 0))
+        prediction          = self.predict_complexity(n)
+        predicted_steps     = float(prediction.get("steps", 0))
         predicted_peak_log2 = float(prediction.get("predicted_peak_log2", log_n))
         predicted_peak_extra = predicted_peak_log2 - log_n
 
-        self.training_samples += 1
-        self.sum_steps_per_bit += steps_per_bit
-        self.sum_peak_ratio += peak_ratio
+        self.training_samples   += 1
+        self.sum_steps_per_bit  += steps_per_bit
+        self.sum_peak_ratio     += peak_ratio
         self.sum_log_peak_ratio += peak_log_ratio
 
         self.steps_per_bit_stats.update(steps_per_bit)
         self.peak_log_ratio_stats.update(peak_log_ratio)
+        self.odd_ratio_stats.update(odd_ratio)
 
-        self._update_bucket(self.step_bucket_stats["bitlen"], bitlen, steps_per_bit)
-        self._update_bucket(self.step_bucket_stats["residue8"], n & 7, steps_per_bit)
-        self._update_bucket(self.step_bucket_stats["tz"], min(32, self._tz(n)), steps_per_bit)
-        self._update_bucket(self.step_bucket_stats["popbin"], self._popbin(n), steps_per_bit)
+        residue3 = n % 3
 
-        self._update_bucket(self.peak_bucket_stats["bitlen"], bitlen, peak_log_ratio)
-        self._update_bucket(self.peak_bucket_stats["residue8"], n & 7, peak_log_ratio)
-        self._update_bucket(self.peak_bucket_stats["tz"], min(32, self._tz(n)), peak_log_ratio)
-        self._update_bucket(self.peak_bucket_stats["popbin"], self._popbin(n), peak_log_ratio)
+        self._update_bucket(self.step_bucket_stats["bitlen"],   bitlen,          steps_per_bit)
+        self._update_bucket(self.step_bucket_stats["residue8"], n & 7,           steps_per_bit)
+        self._update_bucket(self.step_bucket_stats["tz"],       min(32, self._tz(n)), steps_per_bit)
+        self._update_bucket(self.step_bucket_stats["popbin"],   self._popbin(n), steps_per_bit)
+        self._update_bucket(self.step_bucket_stats["residue3"], residue3,        steps_per_bit)
+
+        self._update_bucket(self.peak_bucket_stats["bitlen"],   bitlen,          peak_log_ratio)
+        self._update_bucket(self.peak_bucket_stats["residue8"], n & 7,           peak_log_ratio)
+        self._update_bucket(self.peak_bucket_stats["tz"],       min(32, self._tz(n)), peak_log_ratio)
+        self._update_bucket(self.peak_bucket_stats["popbin"],   self._popbin(n), peak_log_ratio)
+        self._update_bucket(self.peak_bucket_stats["residue3"], residue3,        peak_log_ratio)
 
         self.step_residual_stats.update(steps - predicted_steps)
         self.peak_residual_stats.update(peak_log_ratio - predicted_peak_extra)
 
         if self._is_power_of_two(n):
-            self._update_mean_record(
-                self.learned_patterns["power_of_2"],
-                steps,
-                even,
-                odd,
-                peak_ratio,
-                steps_per_bit,
-            )
+            self._update_mean_record(self.learned_patterns["power_of_2"], steps, even, odd, peak_ratio, steps_per_bit)
         else:
-            self._update_mean_record(
-                self.learned_patterns["odd_multiplier"],
-                steps,
-                even,
-                odd,
-                peak_ratio,
-                steps_per_bit,
-            )
+            self._update_mean_record(self.learned_patterns["odd_multiplier"], steps, even, odd, peak_ratio, steps_per_bit)
 
         features = self._features(n)
-        lr = 0.03 / math.sqrt(self.training_samples + 1.0)
+        lr       = 0.03 / math.sqrt(self.training_samples + 1.0)
+        beta     = self._MOMENTUM_BETA
 
-        step_pred = self._dot(self.step_weights, features)
+        step_pred  = self._dot(self.step_weights, features)
         step_error = steps - step_pred
         for i, x in enumerate(features):
-            self.step_weights[i] += lr * step_error * x
-            self.step_weights[i] = self._clip(self.step_weights[i], -1e4, 1e4)
+            grad                  = step_error * x
+            self.step_momentum[i] = beta * self.step_momentum[i] + (1.0 - beta) * grad
+            self.step_weights[i] += lr * self.step_momentum[i]
+            self.step_weights[i]  = self._clip(self.step_weights[i], -1e4, 1e4)
 
-        peak_pred = self._dot(self.peak_weights, features)
+        peak_pred  = self._dot(self.peak_weights, features)
         peak_error = peak_log_ratio - peak_pred
         for i, x in enumerate(features):
-            self.peak_weights[i] += lr * peak_error * x
-            self.peak_weights[i] = self._clip(self.peak_weights[i], -1e4, 1e4)
+            grad                  = peak_error * x
+            self.peak_momentum[i] = beta * self.peak_momentum[i] + (1.0 - beta) * grad
+            self.peak_weights[i] += lr * self.peak_momentum[i]
+            self.peak_weights[i]  = self._clip(self.peak_weights[i], -1e4, 1e4)
 
         self._invalidate_cache()
 
     def get_learning_stats(self) -> dict:
         return {
-            "cache_size": len(self.prediction_cache),
-            "trained_samples": self.training_samples,
-            "model_revision": self.model_revision,
-            "patterns": self.learned_patterns,
+            "cache_size":             len(self.prediction_cache),
+            "trained_samples":        self.training_samples,
+            "model_revision":         self.model_revision,
+            "patterns":               self.learned_patterns,
             "global_step_mean_per_bit": self.steps_per_bit_stats.mean if self.steps_per_bit_stats.count else None,
-            "global_peak_log2_mean": self.peak_log_ratio_stats.mean if self.peak_log_ratio_stats.count else None,
-            "step_residual_std": self.step_residual_stats.std if self.step_residual_stats.count else None,
-            "peak_residual_std": self.peak_residual_stats.std if self.peak_residual_stats.count else None,
+            "global_peak_log2_mean":  self.peak_log_ratio_stats.mean if self.peak_log_ratio_stats.count else None,
+            "step_residual_std":      self.step_residual_stats.std if self.step_residual_stats.count else None,
+            "peak_residual_std":      self.peak_residual_stats.std if self.peak_residual_stats.count else None,
+            "odd_ratio_mean":         self.odd_ratio_stats.mean if self.odd_ratio_stats.count else None,
         }
 
     def _serialize_bucket_maps(self, bucket_maps: dict) -> dict:
@@ -465,10 +536,11 @@ class SimpleCollatzAI:
 
     def _deserialize_bucket_maps(self, data: dict) -> dict:
         out = {
-            "bitlen": defaultdict(self._new_stats),
+            "bitlen":   defaultdict(self._new_stats),
             "residue8": defaultdict(self._new_stats),
-            "tz": defaultdict(self._new_stats),
-            "popbin": defaultdict(self._new_stats),
+            "tz":       defaultdict(self._new_stats),
+            "popbin":   defaultdict(self._new_stats),
+            "residue3": defaultdict(self._new_stats),
         }
         if not isinstance(data, dict):
             return out
@@ -489,23 +561,27 @@ class SimpleCollatzAI:
             filename = globals().get("AI_TRAINING_FILE", "ai_training.json")
 
         data = {
-            "model_version": 2,
-            "model_revision": self.model_revision,
+            "model_version":    self._MODEL_VERSION,
+            "feature_dim":      self._FEATURE_DIM,
+            "model_revision":   self.model_revision,
             "prediction_cache": {str(k): v[1] for k, v in self.prediction_cache.items()},
             "learned_patterns": self.learned_patterns,
-            "sample_count": self.training_samples,
+            "sample_count":     self.training_samples,
             "training_samples": self.training_samples,
-            "sum_steps_per_bit": self.sum_steps_per_bit,
-            "sum_peak_ratio": self.sum_peak_ratio,
+            "sum_steps_per_bit":  self.sum_steps_per_bit,
+            "sum_peak_ratio":     self.sum_peak_ratio,
             "sum_log_peak_ratio": self.sum_log_peak_ratio,
-            "global_step_stats": self.steps_per_bit_stats.to_dict(),
-            "global_peak_stats": self.peak_log_ratio_stats.to_dict(),
+            "global_step_stats":  self.steps_per_bit_stats.to_dict(),
+            "global_peak_stats":  self.peak_log_ratio_stats.to_dict(),
             "step_residual_stats": self.step_residual_stats.to_dict(),
             "peak_residual_stats": self.peak_residual_stats.to_dict(),
-            "step_bucket_stats": self._serialize_bucket_maps(self.step_bucket_stats),
-            "peak_bucket_stats": self._serialize_bucket_maps(self.peak_bucket_stats),
-            "step_weights": self.step_weights,
-            "peak_weights": self.peak_weights,
+            "odd_ratio_stats":     self.odd_ratio_stats.to_dict(),
+            "step_bucket_stats":   self._serialize_bucket_maps(self.step_bucket_stats),
+            "peak_bucket_stats":   self._serialize_bucket_maps(self.peak_bucket_stats),
+            "step_weights":        self.step_weights,
+            "peak_weights":        self.peak_weights,
+            "step_momentum":       self.step_momentum,
+            "peak_momentum":       self.peak_momentum,
         }
         try:
             with open(filename, "w", encoding="utf-8") as f:
@@ -524,28 +600,20 @@ class SimpleCollatzAI:
             with open(filename, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            self.model_revision = int(data.get("model_revision", 0) or 0)
-            self.training_samples = int(data.get("training_samples", data.get("sample_count", 0)) or 0)
+            self.model_revision    = int(data.get("model_revision", 0)   or 0)
+            self.training_samples  = int(data.get("training_samples", data.get("sample_count", 0)) or 0)
             self.sum_steps_per_bit = float(data.get("sum_steps_per_bit", 0.0) or 0.0)
-            self.sum_peak_ratio = float(data.get("sum_peak_ratio", 0.0) or 0.0)
-            self.sum_log_peak_ratio = float(data.get("sum_log_peak_ratio", 0.0) or 0.0)
+            self.sum_peak_ratio    = float(data.get("sum_peak_ratio",    0.0) or 0.0)
+            self.sum_log_peak_ratio= float(data.get("sum_log_peak_ratio",0.0) or 0.0)
 
             defaults = {
                 "power_of_2": {
-                    "samples": 0,
-                    "steps": 0.0,
-                    "even": 0.0,
-                    "odd": 0.0,
-                    "peak_ratio": 1.0,
-                    "steps_per_bit": 0.0,
+                    "samples": 0, "steps": 0.0, "even": 0.0, "odd": 0.0,
+                    "peak_ratio": 1.0, "steps_per_bit": 0.0,
                 },
                 "odd_multiplier": {
-                    "samples": 0,
-                    "steps": 0.0,
-                    "even": 0.0,
-                    "odd": 0.0,
-                    "peak_ratio": 0.0,
-                    "steps_per_bit": 0.0,
+                    "samples": 0, "steps": 0.0, "even": 0.0, "odd": 0.0,
+                    "peak_ratio": 0.0, "steps_per_bit": 0.0,
                 },
             }
 
@@ -560,20 +628,30 @@ class SimpleCollatzAI:
                 for subkey, subval in dflt.items():
                     self.learned_patterns[key].setdefault(subkey, subval)
 
-            self.steps_per_bit_stats = self._OnlineStats.from_dict(data.get("global_step_stats", {}))
-            self.peak_log_ratio_stats = self._OnlineStats.from_dict(data.get("global_peak_stats", {}))
-            self.step_residual_stats = self._OnlineStats.from_dict(data.get("step_residual_stats", {}))
-            self.peak_residual_stats = self._OnlineStats.from_dict(data.get("peak_residual_stats", {}))
+            self.steps_per_bit_stats  = self._OnlineStats.from_dict(data.get("global_step_stats",   {}))
+            self.peak_log_ratio_stats = self._OnlineStats.from_dict(data.get("global_peak_stats",   {}))
+            self.step_residual_stats  = self._OnlineStats.from_dict(data.get("step_residual_stats", {}))
+            self.peak_residual_stats  = self._OnlineStats.from_dict(data.get("peak_residual_stats", {}))
+            self.odd_ratio_stats      = self._OnlineStats.from_dict(data.get("odd_ratio_stats",     {}))
 
             self.step_bucket_stats = self._deserialize_bucket_maps(data.get("step_bucket_stats", {}))
             self.peak_bucket_stats = self._deserialize_bucket_maps(data.get("peak_bucket_stats", {}))
 
-            step_weights = data.get("step_weights", self.step_weights)
-            peak_weights = data.get("peak_weights", self.peak_weights)
-            if isinstance(step_weights, list) and len(step_weights) == 6:
-                self.step_weights = [float(x) for x in step_weights]
-            if isinstance(peak_weights, list) and len(peak_weights) == 6:
-                self.peak_weights = [float(x) for x in peak_weights]
+            def _load_weights(key: str, current: list) -> list:
+                raw = data.get(key, current)
+                if isinstance(raw, list):
+                    if len(raw) == self._FEATURE_DIM:
+                        return [float(x) for x in raw]
+                    if len(raw) < self._FEATURE_DIM:
+                        padded = [float(x) for x in raw]
+                        padded += [0.0] * (self._FEATURE_DIM - len(padded))
+                        return padded
+                return current
+
+            self.step_weights  = _load_weights("step_weights",  self.step_weights)
+            self.peak_weights  = _load_weights("peak_weights",  self.peak_weights)
+            self.step_momentum = _load_weights("step_momentum", self.step_momentum)
+            self.peak_momentum = _load_weights("peak_momentum", self.peak_momentum)
 
             cache = data.get("prediction_cache", {})
             self.prediction_cache = OrderedDict()
@@ -639,21 +717,53 @@ def _table_layout():
     if width >= 140:
         return dict(exp=10, steps=11, even=10, odd=9, pct=9, dist=29, peak=30, ms=10, ok=5)
     if width >= 120:
-        return dict(exp=9, steps=10, even=9, odd=8, pct=8, dist=24, peak=24, ms=9, ok=3)
+        return dict(exp=9,  steps=10, even=9,  odd=8, pct=8, dist=24, peak=24, ms=9,  ok=3)
     if width >= 100:
-        return dict(exp=8, steps=9, even=8, odd=7, pct=7, dist=20, peak=18, ms=8, ok=3)
+        return dict(exp=8,  steps=9,  even=8,  odd=7, pct=7, dist=20, peak=18, ms=8,  ok=3)
     return dict(exp=7, steps=8, even=7, odd=7, pct=6, dist=16, peak=14, ms=7, ok=3)
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def _available_memory_mb() -> float:
+    try:
+        import resource as _res
+        soft, _ = _res.getrlimit(_res.RLIMIT_AS)
+        if soft > 0:
+            return soft / (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return 512.0
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def _adaptive_batch_size(base_batch: int) -> int:
+    mem_mb = _available_memory_mb()
+    if mem_mb < 256:
+        return max(1, base_batch // 4)
+    if mem_mb < 512:
+        return max(1, base_batch // 2)
+    return base_batch
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 class CalculationError(Exception): pass
 class InvalidInputError(ValueError): pass
+class ResourceLimitError(Exception): pass
+class MemoryLimitError(ResourceLimitError): pass
+
 class AnomalyDetectedError(Exception):
     def __init__(self, n: int, final: int, steps: int, peak: int, expected_final: int = 1):
-        self.n = n
-        self.final = final
-        self.steps = steps
-        self.peak = peak
+        self.n              = n
+        self.final          = final
+        self.steps          = steps
+        self.peak           = peak
         self.expected_final = expected_final
         super().__init__(f"Anomaly: n={n} ended at {final} (expected {expected_final})")
 
@@ -661,9 +771,9 @@ class AnomalyDetectedError(Exception):
 
 class CycleDetectedError(Exception):
     def __init__(self, node: int, entry_step: int, length: int):
-        self.node = node
+        self.node       = node
         self.entry_step = entry_step
-        self.length = length
+        self.length     = length
         super().__init__(f"Cycle detected: re-entry at {node} at step {entry_step}, length={length}")
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -778,7 +888,7 @@ def send_notification(title: str, message: str):
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-def collatz_step_superfast(n: int) -> tuple[int, bool]:
+def collatz_step_superfast(n: int) -> tuple:
     if n & 1 == 0:
         return n >> 1, True
     return (n << 1) + n + 1, False
@@ -797,7 +907,7 @@ def collatz(n: int, verbose: bool = True, delay: float = 0.0, log_writer=None, p
     if not isinstance(n, int) or n <= 0:
         raise InvalidInputError(f"Invalid input: expected integer > 0, got {n!r}")
     steps = even = odd = 0
-    peak = n
+    peak  = n
     pc = progress_callback
     lw = log_writer
     if verbose:
@@ -844,7 +954,7 @@ def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callbac
     if not verbose:
         return collatz_superfast(n, progress_callback, log_writer)
     steps = even = odd = 0
-    peak = n
+    peak  = n
     pc = progress_callback
     lw = log_writer
     while n > 1:
@@ -880,18 +990,21 @@ def collatz_fast(n: int, verbose: bool = True, log_writer=None, progress_callbac
 
 def collatz_superfast(n: int, progress_callback=None, log_writer=None):
     steps = even = odd = 0
-    peak = n
-    pc = progress_callback
+    peak  = n
+    pc    = progress_callback
     while n > 1:
         if n & 1 == 0:
-            tz = (n & -n).bit_length() - 1
-            n >>= tz
+            tz    = (n & -n).bit_length() - 1
+            n   >>= tz
             even += tz
-            steps += tz
+            steps+= tz
         else:
-            n = n + (n << 1) + 1
-            odd += 1
-            steps += 1
+            n     = n + (n << 1) + 1
+            tz    = (n & -n).bit_length() - 1
+            n   >>= tz
+            even += tz
+            odd  += 1
+            steps+= tz + 1
         if n > peak:
             peak = n
         if pc:
@@ -905,24 +1018,60 @@ def collatz_superfast(n: int, progress_callback=None, log_writer=None):
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-def _collatz_superfast_pure(n: int) -> tuple[int, int, int, int, int]:
+def _collatz_superfast_pure(n: int) -> tuple:
     steps = even = odd = 0
-    peak = n
+    peak  = n
     while n > 1:
         if n & 1 == 0:
-            tz = (n & -n).bit_length() - 1
-            n >>= tz
+            tz    = (n & -n).bit_length() - 1
+            n   >>= tz
             even += tz
-            steps += tz
+            steps+= tz
         else:
-            n = n + (n << 1) + 1
-            odd += 1
-            steps += 1
+            n     = n + (n << 1) + 1
+            tz    = (n & -n).bit_length() - 1
+            n   >>= tz
+            even += tz
+            odd  += 1
+            steps+= tz + 1
         if n > peak:
             peak = n
     if n != 1:
         raise AnomalyDetectedError(steps, n, steps, peak, 1)
     return steps, even, odd, n, peak
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def collatz_trace(n: int, max_steps: int = _MAX_TRACE_STEPS) -> tuple:
+    if not isinstance(n, int) or n <= 0:
+        raise InvalidInputError(f"Invalid input: expected integer > 0, got {n!r}")
+    sequence = [n]
+    steps = even = odd = 0
+    peak  = n
+    truncated = False
+    orig  = n
+    while n > 1:
+        if steps >= max_steps:
+            truncated = True
+            break
+        if n & 1 == 0:
+            tz    = (n & -n).bit_length() - 1
+            n   >>= tz
+            even += tz
+            steps+= tz
+        else:
+            n     = n + (n << 1) + 1
+            tz    = (n & -n).bit_length() - 1
+            n   >>= tz
+            even += tz
+            odd  += 1
+            steps+= tz + 1
+        if n > peak:
+            peak = n
+        sequence.append(n)
+    if not truncated and n != 1:
+        raise AnomalyDetectedError(orig, n, steps, peak, 1)
+    return sequence, steps, even, odd, n, peak, truncated
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -935,6 +1084,8 @@ def _worker_power(args):
         return i, None, None, None, None, None, "INTERRUPTED"
     except AnomalyDetectedError as e:
         return i, 0, 0, 0, 0, 0, f"ANOMALY: final={e.final} expected={e.expected_final}"
+    except MemoryError:
+        return i, 0, 0, 0, 0, 0, f"MEMORY_ERROR: insufficient RAM for {i}"
     except Exception as e:
         return i, 0, 0, 0, 0, 0, f"{type(e).__name__}: {e}"
     ms = (time.perf_counter() - t0) * 1000
@@ -942,7 +1093,7 @@ def _worker_power(args):
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-def collatz_step_negative(n: int) -> tuple[int, bool]:
+def collatz_step_negative(n: int) -> tuple:
     if n & 1 == 0:
         r = n >> 1
         if n >= 0 and n - (n >> 1) != r:
@@ -958,7 +1109,7 @@ def collatz_step_negative(n: int) -> tuple[int, bool]:
 def collatz_negative(n: int, verbose: bool = True, log_writer=None):
     if n == 0:
         raise InvalidInputError("0 is not a valid input for negative Collatz")
-    seen = {}
+    seen  = {}
     steps = 0
     log("INFO", f"Starting NEGATIVE Collatz with n = {n}", Fore.MAGENTA)
     lw = log_writer
@@ -980,7 +1131,7 @@ def collatz_negative(n: int, verbose: bool = True, log_writer=None):
             except Exception:
                 pass
     entry_step = seen[n]
-    length = steps - entry_step
+    length     = steps - entry_step
     raise CycleDetectedError(n, entry_step, length)
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1001,11 +1152,24 @@ def _format_large_number(n: int, max_len: int = 20) -> str:
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
+def _open_file(path: str):
+    try:
+        if _PLATFORM == "Windows":
+            os.startfile(path)
+        elif _PLATFORM == "Darwin":
+            os.system(f'open "{path}"')
+        else:
+            os.system(f'xdg-open "{path}" 2>/dev/null &')
+    except Exception:
+        pass
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def reset_logs():
     try:
         if os.path.exists(LOGS_DIR):
             shutil.rmtree(LOGS_DIR)
-        for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR, os.path.dirname(AI_TRAINING_FILE)]:
+        for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR, GRAPHS_DIR, os.path.dirname(AI_TRAINING_FILE)]:
             os.makedirs(d, exist_ok=True)
         log("INFO", "All log files have been deleted and directories recreated.", Fore.CYAN)
     except Exception as e:
@@ -1021,7 +1185,7 @@ def test_powers():
             if not raw:
                 base = 2
                 break
-            raw = raw.replace("_", "").replace(" ", "")
+            raw  = raw.replace("_", "").replace(" ", "")
             base = int(raw)
             if base < 2:
                 print(f"{Fore.RED}Base must be >= 2.{Style.RESET_ALL}")
@@ -1046,7 +1210,7 @@ def test_powers():
     if verify_conditions:
         try:
             resp_auto = input(Fore.CYAN + "Automatically answer 'y' to all continuation prompts? (y/n, default n): " + Style.RESET_ALL).strip().lower()
-            auto_yes = (resp_auto == 'y')
+            auto_yes  = (resp_auto == 'y')
         except KeyboardInterrupt:
             log("INFO", "Test cancelled", Fore.YELLOW)
             return
@@ -1054,40 +1218,41 @@ def test_powers():
     use_parallel = False
     if _CPU_COUNT > 1:
         try:
-            resp_par = input(Fore.CYAN + f"Use parallel computation ({_CPU_COUNT} CPU cores)? (y/n, default n): " + Style.RESET_ALL).strip().lower()
+            resp_par  = input(Fore.CYAN + f"Use parallel computation ({_CPU_COUNT} CPU cores)? (y/n, default n): " + Style.RESET_ALL).strip().lower()
             use_parallel = (resp_par == 'y')
         except KeyboardInterrupt:
             log("INFO", "Test cancelled", Fore.YELLOW)
             return
 
-    BATCH = max(2, _CPU_COUNT * 2) if use_parallel else 1
+    base_batch   = max(2, _CPU_COUNT * 2) if use_parallel else 1
+    BATCH        = _adaptive_batch_size(base_batch)
 
     log("INFO", f"POWERS TEST OF {base} — start (parallel={use_parallel}, cores={_CPU_COUNT})", Fore.MAGENTA)
-    layout = _table_layout()
-    COL_EXP = layout["exp"]
-    COL_STEPS = layout["steps"]
+    layout   = _table_layout()
+    COL_EXP  = layout["exp"]
+    COL_STEPS= layout["steps"]
     COL_EVEN = layout["even"]
-    COL_ODD = layout["odd"]
-    COL_PCT = layout["pct"]
+    COL_ODD  = layout["odd"]
+    COL_PCT  = layout["pct"]
     COL_PEAK = layout["peak"]
-    COL_MS = layout["ms"]
-    COL_OK = layout["ok"]
+    COL_MS   = layout["ms"]
+    COL_OK   = layout["ok"]
     COL_DIST = layout["dist"]
     TOT = COL_EXP + COL_STEPS + COL_EVEN + COL_ODD + COL_PCT + COL_DIST + COL_PEAK + COL_MS + COL_OK
-    sep = Fore.LIGHTBLACK_EX + "─" * TOT + Style.RESET_ALL
+    sep    = Fore.LIGHTBLACK_EX + "─" * TOT + Style.RESET_ALL
     header = (f"{Fore.LIGHTBLACK_EX}{'EXP':<{COL_EXP}}{'STEPS':<{COL_STEPS}}{'EVEN':<{COL_EVEN}}{'ODD':<{COL_ODD}}{'%EVEN':<{COL_PCT}}"
               f"{'DIST EVEN(blue)░ ODD(yellow)█':<{COL_DIST}}{'PEAK':<{COL_PEAK}}{'ms':<{COL_MS}}{'OK':<{COL_OK}}{Style.RESET_ALL}")
     print(f"\n{sep}\n{header}\n{sep}")
     tot_steps = tot_even = tot_odd = max_steps = max_peak = counter = 0
-    timestamp = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
-    specific_log = os.path.join(RESULTS_DIR, f"collatz_powers_{base}_{timestamp}.txt")
+    timestamp       = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
+    specific_log    = os.path.join(RESULTS_DIR, f"collatz_powers_{base}_{timestamp}.txt")
     specific_log_path = os.path.abspath(specific_log)
     write_specific, specific_handle = _make_writer(specific_log)
     write_specific(f"Powers test of {base} - started {datetime.now(tz_rome).strftime(FMT)}")
     write_specific("")
 
     interrupted = False
-    anomalies = []
+    anomalies   = []
 
     def handle_anomaly(idx: int, final: int, steps: int, odd: int) -> bool:
         nonlocal interrupted
@@ -1131,10 +1296,10 @@ def test_powers():
         return True
 
     def emit_row(idx: int, steps: int, even: int, odd: int, peak: int, ms: float):
-        pct = even / steps if steps else 0
+        pct    = even / steps if steps else 0
         term_w = _term_width()
-        compact = term_w < 100
-        bar_w = 8 if term_w < 110 else 12
+        compact= term_w < 100
+        bar_w  = 8 if term_w < 110 else 12
         if compact:
             peak_str = _format_large_number(peak, max_len=max(8, term_w - 60))
             print(f"{Fore.CYAN}{str(base)+'^'+str(idx):<10}{Style.RESET_ALL} "
@@ -1146,8 +1311,8 @@ def test_powers():
                   f"{Fore.MAGENTA}{ms:<7.3f}{Style.RESET_ALL} "
                   f"{Fore.GREEN}✓{Style.RESET_ALL}")
         else:
-            bar_e = _bar(even, steps, bar_w)
-            bar_o = _bar(odd, steps, bar_w)
+            bar_e    = _bar(even, steps, bar_w)
+            bar_o    = _bar(odd,  steps, bar_w)
             dist_str = f"{Fore.BLUE}{bar_e}{Style.RESET_ALL}{Fore.LIGHTBLACK_EX}│{Style.RESET_ALL}{Fore.YELLOW}{bar_o}{Style.RESET_ALL}"
             peak_str = _format_large_number(peak, max_len=max(8, COL_PEAK - 2))
             print(f"{Fore.CYAN}{str(base)+'^'+str(idx):<{COL_EXP}}{Style.RESET_ALL}"
@@ -1166,13 +1331,13 @@ def test_powers():
         nonlocal tot_steps, tot_even, tot_odd, max_steps, max_peak, counter
         ok = (final == 1 and steps == idx and odd == 0) if verify_conditions else True
         tot_steps += steps
-        tot_even += even
-        tot_odd += odd
+        tot_even  += even
+        tot_odd   += odd
         if steps > max_steps:
             max_steps = steps
         if peak > max_peak:
             max_peak = peak
-        counter += 1
+        counter   += 1
         if not ok and not handle_anomaly(idx, final, steps, odd):
             return False
         emit_row(idx, steps, even, odd, peak, ms)
@@ -1187,7 +1352,7 @@ def test_powers():
             use_parallel = False
 
     if use_parallel:
-        i = 1
+        i         = 1
         current_n = base
         try:
             while True:
@@ -1195,11 +1360,17 @@ def test_powers():
                 for _ in range(BATCH):
                     batch_args.append((i, current_n))
                     current_n *= base
-                    i += 1
+                    i         += 1
                 try:
                     results = pool.map(_worker_power, batch_args, chunksize=1)
                 except KeyboardInterrupt:
                     log("INFO", "Test interrupted by user", Fore.YELLOW)
+                    pool.terminate()
+                    pool.join()
+                    interrupted = True
+                    break
+                except MemoryError:
+                    log("ERROR", "Out of memory in parallel workers. Stopping test.", Fore.RED)
                     pool.terminate()
                     pool.join()
                     interrupted = True
@@ -1215,6 +1386,10 @@ def test_powers():
                         idx, steps, even, odd, final, peak, err_msg = res
                         if err_msg == "INTERRUPTED":
                             log("INFO", "Worker interrupted by user", Fore.YELLOW)
+                            interrupted = True
+                            break
+                        if "MEMORY_ERROR" in err_msg:
+                            log("ERROR", f"{base}^{idx} - {err_msg}", Fore.RED)
                             interrupted = True
                             break
                         if "ANOMALY" in err_msg or "expected" in err_msg:
@@ -1234,6 +1409,8 @@ def test_powers():
                     collatz_ai.learn_from_result(base**idx, steps, peak, even, odd)
                 if interrupted:
                     break
+                if counter % 50 == 0:
+                    gc.collect()
         finally:
             if 'pool' in locals() and pool is not None:
                 try:
@@ -1246,13 +1423,17 @@ def test_powers():
     else:
         current_n = base
         for i in range(1, 1_000_000_000):
-            n_orig = current_n
+            n_orig     = current_n
             current_n *= base
             t0 = time.perf_counter()
             try:
                 steps, even, odd, final, peak = collatz_superfast(n_orig)
             except KeyboardInterrupt:
                 log("INFO", "Test interrupted by user", Fore.YELLOW)
+                break
+            except MemoryError:
+                log("ERROR", f"Out of memory at {base}^{i}. Stopping test.", Fore.RED)
+                write_specific(f"MEMORY ERROR at {base}^{i}: insufficient RAM")
                 break
             except AnomalyDetectedError as e:
                 if not handle_anomaly(i, e.final, e.steps, 0):
@@ -1268,14 +1449,16 @@ def test_powers():
             if not process_result(i, steps, even, odd, final, peak, ms):
                 break
             collatz_ai.learn_from_result(n_orig, steps, peak, even, odd)
+            if i % 100 == 0:
+                gc.collect()
 
     print(sep)
-    log("INFO", f"Numbers tested : {counter}", Fore.CYAN)
-    log("INFO", f"Total steps    : {tot_steps}", Fore.WHITE)
-    log("INFO", f"Total even     : {tot_even}", Fore.BLUE)
-    log("INFO", f"Total odd      : {tot_odd}", Fore.YELLOW)
-    log("INFO", f"Max steps      : {max_steps}", Fore.MAGENTA)
-    log("INFO", f"Absolute peak  : {_format_large_number(max_peak, 30)}", Fore.GREEN)
+    log("INFO", f"Numbers tested : {counter}",                                   Fore.CYAN)
+    log("INFO", f"Total steps    : {tot_steps}",                                 Fore.WHITE)
+    log("INFO", f"Total even     : {tot_even}",                                  Fore.BLUE)
+    log("INFO", f"Total odd      : {tot_odd}",                                   Fore.YELLOW)
+    log("INFO", f"Max steps      : {max_steps}",                                 Fore.MAGENTA)
+    log("INFO", f"Absolute peak  : {_format_large_number(max_peak, 30)}",        Fore.GREEN)
     write_specific("\n=== SUMMARY ===")
     write_specific(f"Numbers tested : {counter}")
     write_specific(f"Total steps    : {tot_steps}")
@@ -1311,23 +1494,23 @@ def read_integer(prompt: str) -> int:
             raw = input(prompt).strip().replace("_", "").replace(" ", "")
             if not raw:
                 raise InvalidInputError("Empty input")
-            
+
             cleaned = ""
             for char in raw:
                 if char.isdigit():
                     cleaned += char
                 elif char not in "-+":
                     log("ERROR", f"Invalid character '{char}' in input. Removing invalid characters.", Fore.YELLOW)
-            
+
             if not cleaned:
                 raise InvalidInputError("No valid digits found in input")
-            
+
             result = int(cleaned)
-            
+
             if result <= 0:
                 log("ERROR", f"Number must be positive, got {result}", Fore.RED)
                 continue
-            
+
             log("INFO", f"Input accepted: {result} ({len(str(result))} digits)", Fore.GREEN)
             return result
         except ValueError as e:
@@ -1347,10 +1530,13 @@ def manual_mode():
     if x <= 0:
         log("ERROR", f"Number must be > 0, got {x}", Fore.RED)
         return
-    
+
     ai_prediction = collatz_ai.predict_complexity(x)
+    ai_trajectory = collatz_ai.predict_trajectory(x)
     log("INFO", f"AI Prediction - Complexity: {ai_prediction['complexity']}, Est. Steps: {ai_prediction['steps']}", Fore.CYAN)
-    
+    log("INFO", f"AI Trajectory - Odd ratio: {ai_trajectory['predicted_odd_ratio']:.3f}, Peak step ~{ai_trajectory['predicted_peak_step']}", Fore.CYAN)
+    log("INFO", f"AI Final confidence: {ai_trajectory['final_confidence']:.4f}", Fore.CYAN)
+
     verbose = False
     if x > 10**4:
         try:
@@ -1359,12 +1545,13 @@ def manual_mode():
             return
     else:
         verbose = True
-    timestamp = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
-    specific_log = os.path.join(RESULTS_DIR, f"collatz_manual_{timestamp}.txt")
+    timestamp         = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
+    specific_log      = os.path.join(RESULTS_DIR, f"collatz_manual_{timestamp}.txt")
     specific_log_path = os.path.abspath(specific_log)
     write_specific, specific_handle = _make_writer(specific_log)
     write_specific(f"Manual calculation for n = {x} - started {datetime.now(tz_rome).strftime(FMT)}")
     write_specific(f"AI Prediction: complexity={ai_prediction['complexity']}, est_steps={ai_prediction['steps']}")
+    write_specific(f"AI Trajectory: odd_ratio={ai_trajectory['predicted_odd_ratio']:.3f}, final_confidence={ai_trajectory['final_confidence']:.4f}")
     log_writer = write_specific if verbose else None
     t0 = time.perf_counter()
     try:
@@ -1381,6 +1568,10 @@ def manual_mode():
         log("FATAL ERROR", f"Calculation interrupted due to arithmetic error: {e}", Fore.RED, exc_info=True)
         write_specific(f"FATAL ERROR: {e}")
         return
+    except MemoryError:
+        log("MEMORY ERROR", "Insufficient RAM to complete computation. Try a smaller number.", Fore.RED)
+        write_specific("MEMORY ERROR: insufficient RAM")
+        return
     except InvalidInputError as e:
         log("INPUT ERROR", str(e), Fore.RED)
         write_specific(f"INPUT ERROR: {e}")
@@ -1395,15 +1586,17 @@ def manual_mode():
         return
     elapsed = time.perf_counter() - t0
     print("\n──────── RESULTS ────────\n")
-    log("INFO", f"Total steps : {steps}", Fore.CYAN)
-    log("INFO", f"Even steps  : {even}", Fore.BLUE)
-    log("INFO", f"Odd steps   : {odd}", Fore.YELLOW)
-    log("INFO", f"Final value : {final}", Fore.GREEN)
-    log("INFO", f"Maximum peak: {peak}", Fore.MAGENTA)
+    log("INFO", f"Total steps : {steps}",    Fore.CYAN)
+    log("INFO", f"Even steps  : {even}",     Fore.BLUE)
+    log("INFO", f"Odd steps   : {odd}",      Fore.YELLOW)
+    log("INFO", f"Final value : {final}",    Fore.GREEN)
+    log("INFO", f"Maximum peak: {peak}",     Fore.MAGENTA)
     log("INFO", f"Elapsed time: {elapsed:.6f}s", Fore.GREEN)
     if ai_prediction['steps'] > 0:
         accuracy = (ai_prediction['steps'] - abs(steps - ai_prediction['steps'])) / ai_prediction['steps'] * 100
-        log("INFO", f"AI Prediction Accuracy: {accuracy:.1f}% (predicted {ai_prediction['steps']} steps)", Fore.CYAN)
+        log("INFO", f"AI Step Accuracy   : {accuracy:.1f}% (predicted {ai_prediction['steps']}, actual {steps})", Fore.CYAN)
+    actual_odd_ratio = odd / max(1, steps)
+    log("INFO", f"Actual odd ratio   : {actual_odd_ratio:.4f} (predicted {ai_trajectory['predicted_odd_ratio']:.4f})", Fore.CYAN)
     write_specific("\n=== RESULTS ===")
     write_specific(f"Total steps : {steps}")
     write_specific(f"Even steps  : {even}")
@@ -1445,8 +1638,8 @@ def negative_mode():
     if x > 0:
         x = -x
         log("INFO", f"Positive input detected. Using {x} instead.", Fore.CYAN)
-    timestamp = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
-    specific_log = os.path.join(RESULTS_DIR, f"collatz_negative_{x}_{timestamp}.txt")
+    timestamp         = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
+    specific_log      = os.path.join(RESULTS_DIR, f"collatz_negative_{x}_{timestamp}.txt")
     specific_log_path = os.path.abspath(specific_log)
     write_specific, specific_handle = _make_writer(specific_log)
     write_specific(f"Negative calculation for n = {x} - started {datetime.now(tz_rome).strftime(FMT)}")
@@ -1454,10 +1647,10 @@ def negative_mode():
     try:
         collatz_negative(x, verbose=True, log_writer=write_specific)
     except CycleDetectedError as e:
-        log("INFO", "CYCLE DETECTED", Fore.YELLOW)
-        log("INFO", f"Re-entry node     : {e.node}", Fore.GREEN)
-        log("INFO", f"Entry step        : {e.entry_step}", Fore.CYAN)
-        log("INFO", f"Cycle length      : {e.length} steps", Fore.MAGENTA)
+        log("INFO", "CYCLE DETECTED",                                 Fore.YELLOW)
+        log("INFO", f"Re-entry node     : {e.node}",                 Fore.GREEN)
+        log("INFO", f"Entry step        : {e.entry_step}",           Fore.CYAN)
+        log("INFO", f"Cycle length      : {e.length} steps",         Fore.MAGENTA)
         _write_log("CYCLE", str(e))
         write_specific("\n=== CYCLE DETECTED ===")
         write_specific(f"Re-entry node     : {e.node}")
@@ -1490,11 +1683,338 @@ def negative_mode():
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
+def _collatz_negative_trace(n: int, max_steps: int = _MAX_TRACE_STEPS) -> tuple:
+    seq = [n]
+    seen = {n: 0}
+    steps = 0
+    cur = n
+    while True:
+        if steps >= max_steps:
+            return seq, steps, -1, 0, cur, True
+        if cur & 1 == 0:
+            cur >>= 1
+        else:
+            cur = cur * 3 + 1
+        steps += 1
+        if cur in seen:
+            seq.append(cur)
+            entry_step = seen[cur]
+            cycle_len = steps - entry_step
+            return seq, steps, entry_step, cycle_len, cur, False
+        seen[cur] = steps
+        seq.append(cur)
+
+def _build_graph_matplotlib(n_orig: int, sequence: list, steps: int, even: int, odd: int, peak: int, truncated: bool, out_path: str, cycle_entry_step=None, cycle_length=None) -> bool:
+    if not _MATPLOTLIB_AVAILABLE:
+        return False
+    # Sopprime il warning di overflow nei tick per numeri molto grandi
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message="overflow encountered in multiply")
+        try:
+            total_pts = len(sequence)
+            if total_pts > _MAX_GRAPH_SAMPLES:
+                step_size = max(1, total_pts // _MAX_GRAPH_SAMPLES)
+                x_vals    = list(range(0, total_pts, step_size))
+                y_vals    = [sequence[i] for i in x_vals]
+            else:
+                x_vals = list(range(total_pts))
+                y_vals = sequence[:]
+
+            y_log = []
+            for v in y_vals:
+                try:
+                    y_log.append(math.log2(abs(v)) if v != 0 else 0.0)
+                except Exception:
+                    y_log.append(float(v.bit_length() - 1) if hasattr(v, 'bit_length') else 0.0)
+
+            fig = plt.figure(figsize=(14, 9), facecolor="#0d0d0d")
+            gs  = GridSpec(3, 2, figure=fig, hspace=0.45, wspace=0.35,
+                           top=0.92, bottom=0.07, left=0.08, right=0.97)
+
+            ax_traj = fig.add_subplot(gs[0, :])
+            ax_log  = fig.add_subplot(gs[1, :])
+            ax_bar  = fig.add_subplot(gs[2, 0])
+            ax_info = fig.add_subplot(gs[2, 1])
+
+            _DARK  = "#0d0d0d"
+            _GRID  = "#2a2a2a"
+            _PINK2 = "#f472b6"
+            _CYAN2 = "#67e8f9"
+            _YELL  = "#fde68a"
+            _GRN   = "#6ee7b7"
+            _FG    = "#e2e8f0"
+
+            for ax in (ax_traj, ax_log, ax_bar, ax_info):
+                ax.set_facecolor(_DARK)
+                ax.tick_params(colors=_FG, labelsize=8)
+                for spine in ax.spines.values():
+                    spine.set_edgecolor(_GRID)
+
+            def _safe_float_seq(seq):
+                out = []
+                for v in seq:
+                    try:
+                        out.append(float(v))
+                    except (OverflowError, ValueError):
+                        out.append(float('inf'))
+                return out
+
+            y_float = _safe_float_seq(y_vals)
+            finite  = [v for v in y_float if math.isfinite(v)]
+            y_max   = max(finite) if finite else 1.0
+
+            title_str = f"Collatz trajectory  n = {_format_large_number(n_orig, 30)}"
+            if cycle_length is not None and cycle_length > 0:
+                title_str += f"  [CYCLE length {cycle_length}]"
+            ax_traj.plot(x_vals, y_float, color=_PINK2, linewidth=0.7, alpha=0.9)
+            ax_traj.fill_between(x_vals, y_float, alpha=0.12, color=_PINK2)
+            ax_traj.set_title(title_str, color=_FG, fontsize=10, pad=6)
+            ax_traj.set_xlabel("Step", color=_FG, fontsize=8)
+            ax_traj.set_ylabel("Value", color=_FG, fontsize=8)
+            ax_traj.grid(True, color=_GRID, linewidth=0.4)
+            ax_traj.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _format_large_number(int(v), 10) if math.isfinite(v) else "∞"))
+
+            ax_log.plot(x_vals, y_log, color=_CYAN2, linewidth=0.7, alpha=0.9)
+            ax_log.fill_between(x_vals, y_log, alpha=0.12, color=_CYAN2)
+            ax_log.set_title("Trajectory (log₂ |value|)", color=_FG, fontsize=10, pad=6)
+            ax_log.set_xlabel("Step", color=_FG, fontsize=8)
+            ax_log.set_ylabel("log₂|value|", color=_FG, fontsize=8)
+            ax_log.grid(True, color=_GRID, linewidth=0.4)
+
+            categories = ["Even steps", "Odd steps"]
+            counts     = [even, odd]
+            colors     = [_CYAN2, _YELL]
+            bars       = ax_bar.bar(categories, counts, color=colors, width=0.5, edgecolor=_GRID)
+            ax_bar.set_title("Step distribution", color=_FG, fontsize=10, pad=6)
+            ax_bar.set_ylabel("Count", color=_FG, fontsize=8)
+            ax_bar.grid(True, axis="y", color=_GRID, linewidth=0.4)
+            for bar, val in zip(bars, counts):
+                ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(counts) * 0.01,
+                            str(val), ha="center", va="bottom", color=_FG, fontsize=8)
+
+            ax_info.axis("off")
+            pct_even  = even / steps * 100 if steps else 0
+            pct_odd   = odd  / steps * 100 if steps else 0
+            peak_str  = _format_large_number(peak, 25)
+            n_str     = _format_large_number(n_orig, 25)
+            trunc_tag = "  [TRUNCATED]" if truncated else ""
+            info_lines = [
+                ("n",            n_str),
+                ("Total steps",  f"{steps}{trunc_tag}"),
+                ("Even steps",   f"{even}  ({pct_even:.1f}%)"),
+                ("Odd steps",    f"{odd}  ({pct_odd:.1f}%)"),
+                ("Peak",         peak_str),
+                ("bits(n)",      str(n_orig.bit_length())),
+                ("bits(peak)",   str(peak.bit_length())),
+                ("Graph points", str(len(x_vals))),
+            ]
+            if cycle_entry_step is not None and cycle_length is not None:
+                info_lines.append(("Cycle entry", str(cycle_entry_step)))
+                info_lines.append(("Cycle length", str(cycle_length)))
+            for row, (label, value) in enumerate(info_lines):
+                y_pos = 0.92 - row * 0.115
+                ax_info.text(0.02, y_pos, f"{label}:", transform=ax_info.transAxes,
+                             color=_CYAN2, fontsize=8.5, va="top", fontweight="bold")
+                ax_info.text(0.42, y_pos, value, transform=ax_info.transAxes,
+                             color=_FG, fontsize=8.5, va="top")
+
+            tit  = "Collatz Deep Drive v2.1"
+            fig.text(0.5, 0.97, tit, ha="center", va="top", color=_PINK2, fontsize=11, fontweight="bold")
+
+            plt.savefig(out_path, dpi=130, bbox_inches="tight", facecolor=_DARK)
+            plt.close(fig)
+            gc.collect()
+            return True
+        except Exception as e:
+            _write_log("ERROR", f"Matplotlib graph failed: {e}", exc_info=True)
+            try:
+                plt.close("all")
+            except Exception:
+                pass
+            return False
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def _build_graph_ascii(sequence: list, steps: int, even: int, odd: int, peak: int, truncated: bool, cycle_entry_step=None, cycle_length=None):
+    width  = min(_term_width() - 4, 80)
+    height = 16
+    if not sequence:
+        print(f"{Fore.RED}No sequence data to display.{Style.RESET_ALL}")
+        return
+    total = len(sequence)
+    step_size = max(1, total // width)
+    sampled   = [sequence[i] for i in range(0, total, step_size)][:width]
+    try:
+        vals_f = [float(abs(v)) for v in sampled]
+    except (OverflowError, TypeError):
+        vals_f = [float(v.bit_length()) for v in sampled]
+    vmin = min(vals_f)
+    vmax = max(vals_f) if max(vals_f) > vmin else vmin + 1
+
+    grid = [[" "] * len(sampled) for _ in range(height)]
+    for col, val in enumerate(vals_f):
+        row = int((val - vmin) / (vmax - vmin) * (height - 1))
+        row = height - 1 - max(0, min(row, height - 1))
+        grid[row][col] = "█"
+
+    trunc_tag = " [TRUNCATED]" if truncated else ""
+    cycle_tag = f"  CYCLE length {cycle_length}" if cycle_length else ""
+    print(f"\n{_PINK_SOFT}Collatz trajectory — n steps={steps}{trunc_tag}{cycle_tag}{_RST}")
+    print(f"{Fore.LIGHTBLACK_EX}{'─' * (width + 2)}{_RST}")
+    for row in grid:
+        print(f"{Fore.LIGHTBLACK_EX}│{_RST}" + "".join(
+            f"{_PINK_SOFT if c == '█' else ' '}{c}{_RST if c == '█' else ''}"
+            for c in row
+        ) + f"{Fore.LIGHTBLACK_EX}│{_RST}")
+    print(f"{Fore.LIGHTBLACK_EX}{'─' * (width + 2)}{_RST}")
+    lo_str = _format_large_number(int(vmin), 12)
+    hi_str = _format_large_number(int(vmax), 12)
+    print(f"  {Fore.CYAN}min≈{lo_str}{_RST}   {Fore.MAGENTA}peak≈{hi_str}{_RST}")
+    pct = even / steps * 100 if steps else 0
+    print(f"  {Fore.BLUE}Even: {even} ({pct:.1f}%){_RST}   {Fore.YELLOW}Odd: {odd} ({100-pct:.1f}%){_RST}\n")
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def graph_mode():
+    if not _MATPLOTLIB_AVAILABLE:
+        log("WARNING", "matplotlib not installed — ASCII fallback will be used.", Fore.YELLOW)
+        log("WARNING", "Install it with:  pip install matplotlib", Fore.YELLOW)
+
+    while True:
+        try:
+            raw = input(Fore.CYAN + "Enter an integer (positive or negative) to graph its Collatz sequence: " + Style.RESET_ALL).strip().replace("_", "").replace(" ", "")
+            if not raw:
+                log("ERROR", "Empty input", Fore.RED)
+                continue
+            if raw == "-":
+                log("ERROR", "Invalid input: '-'", Fore.RED)
+                continue
+            x = int(raw)
+            break
+        except ValueError:
+            log("ERROR", "Invalid input. Please enter an integer.", Fore.RED)
+        except KeyboardInterrupt:
+            return
+    if x == 0:
+        log("ERROR", "0 is not a valid input.", Fore.RED)
+        return
+
+    negative = x < 0
+    if negative:
+        abs_x = -x
+    else:
+        abs_x = x
+    bitlen = abs_x.bit_length()
+    if bitlen > 64 and not _MATPLOTLIB_AVAILABLE:
+        log("WARNING", f"Very large number ({bitlen} bits). ASCII graph may be rough.", Fore.YELLOW)
+
+    if not negative:
+        ai_pred = collatz_ai.predict_complexity(x)
+        log("INFO", f"AI predicts ~{ai_pred['steps']} steps, complexity={ai_pred['complexity']}", Fore.CYAN)
+        est_steps = ai_pred["steps"]
+    else:
+        est_steps = abs_x.bit_length() * 4  # rough guess for negative
+    if est_steps > _GRAPH_WARN_STEPS:
+        try:
+            resp = input(
+                f"{Fore.YELLOW}Estimate ~{est_steps:,} steps. This may take a while "
+                f"and use significant memory. Continue? (y/n): {Style.RESET_ALL}"
+            ).strip().lower()
+            if resp != 'y':
+                log("INFO", "Graph cancelled by user.", Fore.YELLOW)
+                return
+        except KeyboardInterrupt:
+            return
+
+    log("INFO", "Computing Collatz sequence...", Fore.CYAN)
+    t0 = time.perf_counter()
+    try:
+        if not negative:
+            sequence, steps, even, odd, final, peak, truncated = collatz_trace(x, max_steps=_MAX_TRACE_STEPS)
+            cycle_entry_step = None
+            cycle_length = None
+        else:
+            sequence, steps, entry_step, cycle_len, final_node, truncated = _collatz_negative_trace(x, _MAX_TRACE_STEPS)
+            even = 0
+            odd = steps
+            peak = max(abs(v) for v in sequence) if sequence else 0
+            final = final_node
+            cycle_entry_step = entry_step
+            cycle_length = cycle_len
+    except AnomalyDetectedError as e:
+        log("ANOMALY DETECTED", f"Final value {e.final} instead of 1!", Fore.RED, exc_info=True)
+        return
+    except MemoryError:
+        log("MEMORY ERROR", "Insufficient RAM to store full sequence. Try a smaller number.", Fore.RED)
+        return
+    except KeyboardInterrupt:
+        log("INFO", "Computation interrupted by user.", Fore.YELLOW)
+        return
+    except Exception as e:
+        log("UNEXPECTED ERROR", f"{type(e).__name__}: {e}", Fore.RED, exc_info=True)
+        return
+    elapsed = time.perf_counter() - t0
+
+    log("INFO", f"Computed {steps} steps in {elapsed:.4f}s", Fore.GREEN)
+    if truncated:
+        log("WARNING", f"Sequence truncated at {_MAX_TRACE_STEPS} steps.", Fore.YELLOW)
+
+    if not negative:
+        collatz_ai.learn_from_result(x, steps, peak, even, odd)
+
+    timestamp         = datetime.now(tz_rome).strftime("%Y%m%d_%H%M%S")
+    graph_filename    = f"collatz_graph_{timestamp}.png"
+    graph_path        = os.path.join(GRAPHS_DIR, graph_filename)
+    graph_path_abs    = os.path.abspath(graph_path)
+    atexit.register(os.remove, graph_path_abs)
+
+    built = False
+    if _MATPLOTLIB_AVAILABLE:
+        log("INFO", "Generating graph...", Fore.CYAN)
+        built = _build_graph_matplotlib(x, sequence, steps, even, odd, peak, truncated, graph_path_abs,
+                                        cycle_entry_step=cycle_entry_step, cycle_length=cycle_length)
+        if built:
+            log("INFO", f"Graph saved to: {graph_path_abs}", Fore.GREEN)
+            print(f"{Fore.CYAN}→ Graph path: {graph_path_abs}{Style.RESET_ALL}")
+            try:
+                resp_open = input(Fore.CYAN + "Open the graph file now? (y/n, default y): " + Style.RESET_ALL).strip().lower()
+                if resp_open != 'n':
+                    _open_file(graph_path_abs)
+            except KeyboardInterrupt:
+                pass
+        else:
+            log("WARNING", "Matplotlib graph failed — falling back to ASCII.", Fore.YELLOW)
+
+    if not built:
+        _build_graph_ascii(sequence, steps, even, odd, peak, truncated,
+                           cycle_entry_step=cycle_entry_step, cycle_length=cycle_length)
+
+    pct  = even / steps * 100 if steps else 0
+    print()
+    log("INFO", f"n            : {_format_large_number(x, 40)}",    Fore.CYAN)
+    log("INFO", f"Total steps  : {steps}",                           Fore.WHITE)
+    log("INFO", f"Even steps   : {even}  ({pct:.1f}%)",             Fore.BLUE)
+    log("INFO", f"Odd steps    : {odd}  ({100-pct:.1f}%)",          Fore.YELLOW)
+    log("INFO", f"Peak value   : {_format_large_number(peak, 40)}", Fore.MAGENTA)
+    log("INFO", f"Elapsed time : {elapsed:.4f}s",                   Fore.GREEN)
+    if cycle_length:
+        log("INFO", f"Cycle detected: length {cycle_length}, entry at step {cycle_entry_step}", Fore.YELLOW)
+
+    del sequence
+    gc.collect()
+
+    send_notification(
+        "Collatz Deep Drive",
+        f"Graph done — n={_format_large_number(x,20)}  steps={steps}  peak={_format_large_number(peak,20)}"
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
 def show_credits():
     clear_screen()
     width = _box_width(54, 96)
     print()
-    print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")    
+    print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")
     print(f"{_BOLD}{_PINK_SOFT}{_center('CREDITS', width)}{_RST}")
     print(f"{_BOLD}{_PINK_DARK}{'=' * width}{_RST}")
     print()
@@ -1513,7 +2033,7 @@ def draw_menu():
     width = _box_width(58, 96)
     print()
     print(f"{_BLACK_BG}{_BOLD}{_PINK_DARK}{'═' * width}{_RST}")
-    print(f"{_BLACK_BG}{_BOLD}{_PINK_SOFT}{_center('COLLATZ DEEP DRIVE v2.0', width)}{_RST}")
+    print(f"{_BLACK_BG}{_BOLD}{_PINK_SOFT}{_center('COLLATZ DEEP DRIVE v2.1', width)}{_RST}")
     print(f"{_BLACK_BG}{_DIM}{_center(f'{_PLATFORM} · {_CPU_COUNT} cores · window {_term_width()} cols', width)}{_RST}")
     print(f"{_BLACK_BG}{_BOLD}{_PINK_DARK}{'═' * width}{_RST}")
     print()
@@ -1523,6 +2043,8 @@ def draw_menu():
     print(f"     {_DIM}Sequential or parallel batch test on powers of a base.{_RST}")
     print(f"  {_PINK_SOFT}3{_RST}. Negative numbers")
     print(f"     {_DIM}Cycle detection on the negative Collatz variant.{_RST}")
+    print(f"  {_PINK_SOFT}4{_RST}. Graph / visualize sequence")
+    print(f"     {_DIM}Plot the full Collatz trajectory for any number.{_RST}")
     print(f"  {_PINK_SOFT}c{_RST}. Reset all logs")
     print(f"     {_DIM}Deletes every log file and recreates the folders.{_RST}")
     print(f"  {_PINK_SOFT}credits{_RST}. Show credits")
@@ -1544,18 +2066,25 @@ def main():
             break
         if c == "q":
             log("INFO", "Exiting program", Fore.CYAN)
+            collatz_ai.save_to_file()
             print(f"{_PINK_SOFT}\nThank you for using Collatz Deep Drive. Goodbye!\n{_RST}")
             break
         elif c == "1":
             manual_mode()
+            collatz_ai.save_to_file()
             wait_for_enter()
         elif c == "2":
             clear_screen()
             test_powers()
+            collatz_ai.save_to_file()
             wait_for_enter()
         elif c == "3":
             clear_screen()
             negative_mode()
+            wait_for_enter()
+        elif c == "4":
+            clear_screen()
+            graph_mode()
             wait_for_enter()
         elif c == "c":
             clear_screen()
@@ -1575,5 +2104,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
