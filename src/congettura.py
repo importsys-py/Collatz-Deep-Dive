@@ -70,6 +70,17 @@ for d in [LOGS_DIR, RESULTS_DIR, DEBUG_DIR, GRAPHS_DIR, os.path.dirname(AI_TRAIN
     except OSError:
         pass
 
+settings = {
+    "verbose_console": True,
+    "enable_debug_log": True,
+    "enable_notifications": True,
+    "learn_from_results": True,
+    "show_ai_predictions": True,
+    "auto_graph_open": True,
+    "max_ai_cache": 4096,
+    "save_ai_on_exit": True,
+}
+
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 class SimpleCollatzAI:
@@ -445,6 +456,8 @@ class SimpleCollatzAI:
         return dict(result)
 
     def learn_from_result(self, n: int, steps: int, peak: int, even: int, odd: int):
+        if not settings.get("learn_from_results", True):
+            return
         if not isinstance(n, int) or n <= 0:
             return
         if steps < 0 or even < 0 or odd < 0 or peak <= 0:
@@ -494,8 +507,10 @@ class SimpleCollatzAI:
             self._update_mean_record(self.learned_patterns["odd_multiplier"], steps, even, odd, peak_ratio, steps_per_bit)
 
         features = self._features(n)
-        lr       = 0.03 / math.sqrt(self.training_samples + 1.0)
+        # slightly improved learning rate schedule with weight decay
+        lr       = 0.02 / (1.0 + math.sqrt(self.training_samples))
         beta     = self._MOMENTUM_BETA
+        wd       = 1e-6
 
         step_pred  = self._dot(self.step_weights, features)
         step_error = steps - step_pred
@@ -503,6 +518,7 @@ class SimpleCollatzAI:
             grad                  = step_error * x
             self.step_momentum[i] = beta * self.step_momentum[i] + (1.0 - beta) * grad
             self.step_weights[i] += lr * self.step_momentum[i]
+            self.step_weights[i] *= (1.0 - wd)                 # L2 weight decay
             self.step_weights[i]  = self._clip(self.step_weights[i], -1e4, 1e4)
 
         peak_pred  = self._dot(self.peak_weights, features)
@@ -511,6 +527,7 @@ class SimpleCollatzAI:
             grad                  = peak_error * x
             self.peak_momentum[i] = beta * self.peak_momentum[i] + (1.0 - beta) * grad
             self.peak_weights[i] += lr * self.peak_momentum[i]
+            self.peak_weights[i] *= (1.0 - wd)
             self.peak_weights[i]  = self._clip(self.peak_weights[i], -1e4, 1e4)
 
         self._invalidate_cache()
@@ -668,7 +685,7 @@ class SimpleCollatzAI:
         except Exception:
             pass
 
-collatz_ai = SimpleCollatzAI(cache_size=4096)
+collatz_ai = SimpleCollatzAI(cache_size=settings.get("max_ai_cache", 4096))
 collatz_ai.load_from_file()
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -779,6 +796,8 @@ class CycleDetectedError(Exception):
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def _write_log(level: str, message: str, exc_info: bool = False):
+    if not settings.get("enable_debug_log", True):
+        return
     now = datetime.now(tz_rome).strftime(FMT)
     try:
         with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
@@ -810,11 +829,12 @@ def _make_writer(path: str):
 
 def log(level: str, message: str, color=Fore.GREEN, exc_info: bool = False):
     now = datetime.now(tz_rome).strftime(FMT)
-    print(
-        f"{_BLACK_BG}{Fore.LIGHTBLACK_EX}[{_RST}{_PINK_SOFT}{now}{_RST}{Fore.LIGHTBLACK_EX}]{_RST} "
-        f"{_BLACK_BG}{Fore.LIGHTBLACK_EX}[{_RST}{color}{level}{_RST}{Fore.LIGHTBLACK_EX}]{_RST} "
-        f"{color}{message}{_RST}"
-    )
+    if settings.get("verbose_console", True):
+        print(
+            f"{_BLACK_BG}{Fore.LIGHTBLACK_EX}[{_RST}{_PINK_SOFT}{now}{_RST}{Fore.LIGHTBLACK_EX}]{_RST} "
+            f"{_BLACK_BG}{Fore.LIGHTBLACK_EX}[{_RST}{color}{level}{_RST}{Fore.LIGHTBLACK_EX}]{_RST} "
+            f"{color}{message}{_RST}"
+        )
     _write_log(level, message, exc_info)
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -852,6 +872,8 @@ def wait_for_enter(prompt="\nPress Enter to continue..."):
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def send_notification(title: str, message: str):
+    if not settings.get("enable_notifications", True):
+        return
     def _clip(text: str, limit: int) -> str:
         text = str(text)
         if len(text) <= limit:
@@ -1531,11 +1553,15 @@ def manual_mode():
         log("ERROR", f"Number must be > 0, got {x}", Fore.RED)
         return
 
-    ai_prediction = collatz_ai.predict_complexity(x)
-    ai_trajectory = collatz_ai.predict_trajectory(x)
-    log("INFO", f"AI Prediction - Complexity: {ai_prediction['complexity']}, Est. Steps: {ai_prediction['steps']}", Fore.CYAN)
-    log("INFO", f"AI Trajectory - Odd ratio: {ai_trajectory['predicted_odd_ratio']:.3f}, Peak step ~{ai_trajectory['predicted_peak_step']}", Fore.CYAN)
-    log("INFO", f"AI Final confidence: {ai_trajectory['final_confidence']:.4f}", Fore.CYAN)
+    if settings.get("show_ai_predictions", True):
+        ai_prediction = collatz_ai.predict_complexity(x)
+        ai_trajectory = collatz_ai.predict_trajectory(x)
+        log("INFO", f"AI Prediction - Complexity: {ai_prediction['complexity']}, Est. Steps: {ai_prediction['steps']}", Fore.CYAN)
+        log("INFO", f"AI Trajectory - Odd ratio: {ai_trajectory['predicted_odd_ratio']:.3f}, Peak step ~{ai_trajectory['predicted_peak_step']}", Fore.CYAN)
+        log("INFO", f"AI Final confidence: {ai_trajectory['final_confidence']:.4f}", Fore.CYAN)
+    else:
+        ai_prediction = {"complexity": "unknown", "steps": 0}
+        ai_trajectory = {"predicted_odd_ratio": 0.0, "predicted_peak_step": 0, "final_confidence": 0.0}
 
     verbose = False
     if x > 10**4:
@@ -1550,8 +1576,9 @@ def manual_mode():
     specific_log_path = os.path.abspath(specific_log)
     write_specific, specific_handle = _make_writer(specific_log)
     write_specific(f"Manual calculation for n = {x} - started {datetime.now(tz_rome).strftime(FMT)}")
-    write_specific(f"AI Prediction: complexity={ai_prediction['complexity']}, est_steps={ai_prediction['steps']}")
-    write_specific(f"AI Trajectory: odd_ratio={ai_trajectory['predicted_odd_ratio']:.3f}, final_confidence={ai_trajectory['final_confidence']:.4f}")
+    if settings.get("show_ai_predictions", True):
+        write_specific(f"AI Prediction: complexity={ai_prediction['complexity']}, est_steps={ai_prediction['steps']}")
+        write_specific(f"AI Trajectory: odd_ratio={ai_trajectory['predicted_odd_ratio']:.3f}, final_confidence={ai_trajectory['final_confidence']:.4f}")
     log_writer = write_specific if verbose else None
     t0 = time.perf_counter()
     try:
@@ -1592,11 +1619,12 @@ def manual_mode():
     log("INFO", f"Final value : {final}",    Fore.GREEN)
     log("INFO", f"Maximum peak: {peak}",     Fore.MAGENTA)
     log("INFO", f"Elapsed time: {elapsed:.6f}s", Fore.GREEN)
-    if ai_prediction['steps'] > 0:
+    if settings.get("show_ai_predictions", True) and ai_prediction['steps'] > 0:
         accuracy = (ai_prediction['steps'] - abs(steps - ai_prediction['steps'])) / ai_prediction['steps'] * 100
         log("INFO", f"AI Step Accuracy   : {accuracy:.1f}% (predicted {ai_prediction['steps']}, actual {steps})", Fore.CYAN)
     actual_odd_ratio = odd / max(1, steps)
-    log("INFO", f"Actual odd ratio   : {actual_odd_ratio:.4f} (predicted {ai_trajectory['predicted_odd_ratio']:.4f})", Fore.CYAN)
+    if settings.get("show_ai_predictions", True):
+        log("INFO", f"Actual odd ratio   : {actual_odd_ratio:.4f} (predicted {ai_trajectory['predicted_odd_ratio']:.4f})", Fore.CYAN)
     write_specific("\n=== RESULTS ===")
     write_specific(f"Total steps : {steps}")
     write_specific(f"Even steps  : {even}")
@@ -1908,7 +1936,7 @@ def graph_mode():
     if bitlen > 64 and not _MATPLOTLIB_AVAILABLE:
         log("WARNING", f"Very large number ({bitlen} bits). ASCII graph may be rough.", Fore.YELLOW)
 
-    if not negative:
+    if not negative and settings.get("show_ai_predictions", True):
         ai_pred = collatz_ai.predict_complexity(x)
         log("INFO", f"AI predicts ~{ai_pred['steps']} steps, complexity={ai_pred['complexity']}", Fore.CYAN)
         est_steps = ai_pred["steps"]
@@ -1976,12 +2004,13 @@ def graph_mode():
         if built:
             log("INFO", f"Graph saved to: {graph_path_abs}", Fore.GREEN)
             print(f"{Fore.CYAN}→ Graph path: {graph_path_abs}{Style.RESET_ALL}")
-            try:
-                resp_open = input(Fore.CYAN + "Open the graph file now? (y/n, default y): " + Style.RESET_ALL).strip().lower()
-                if resp_open != 'n':
-                    _open_file(graph_path_abs)
-            except KeyboardInterrupt:
-                pass
+            if settings.get("auto_graph_open", True):
+                try:
+                    resp_open = input(Fore.CYAN + "Open the graph file now? (y/n, default y): " + Style.RESET_ALL).strip().lower()
+                    if resp_open != 'n':
+                        _open_file(graph_path_abs)
+                except KeyboardInterrupt:
+                    pass
         else:
             log("WARNING", "Matplotlib graph failed — falling back to ASCII.", Fore.YELLOW)
 
@@ -2028,6 +2057,48 @@ def show_credits():
 
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
+def random_mode():
+    import random
+    clear_screen()
+    print(f"{_BOLD}{_PINK_SOFT}Random Number Generator{_RST}\n")
+    try:
+        digits = input(Fore.CYAN + "How many digits should the number have? " + Style.RESET_ALL).strip()
+        digits = int(digits)
+        if digits < 1:
+            raise ValueError
+        parity = input(Fore.CYAN + "Odd, Even, or Any? (odd/even/any, default any): " + Style.RESET_ALL).strip().lower()
+        if parity not in ("odd", "even", "any", ""):
+            log("ERROR", "Invalid parity, using 'any'", Fore.YELLOW)
+            parity = "any"
+    except (ValueError, KeyboardInterrupt):
+        log("ERROR", "Invalid input. Please enter a positive integer.", Fore.RED)
+        return
+
+    if digits == 1:
+        # 1-digit numbers: 1-9, cannot have leading zero
+        if parity == "odd":
+            n = random.choice([1,3,5,7,9])
+        elif parity == "even":
+            n = random.choice([2,4,6,8])
+        else:
+            n = random.randint(1, 9)
+    else:
+        # generate number as string to ensure exact digit count and parity control
+        first_digit = random.randint(1, 9)
+        middle_digits = [random.randint(0, 9) for _ in range(digits - 2)]
+        if parity == "odd":
+            last_digit = random.choice([1,3,5,7,9])
+        elif parity == "even":
+            last_digit = random.choice([0,2,4,6,8])
+        else:
+            last_digit = random.randint(0, 9)
+        digits_list = [str(first_digit)] + [str(d) for d in middle_digits] + [str(last_digit)]
+        n = int("".join(digits_list))
+
+    print(f"\n{Fore.GREEN}Random number with {digits} digits ({parity if parity else 'any'}):{Style.RESET_ALL}")
+    print(f"{_BOLD}{_PINK}{n}{_RST}\n")
+    wait_for_enter("Press Enter to return to the menu...")
+
 def draw_menu():
     clear_screen()
     width = _box_width(58, 96)
@@ -2045,8 +2116,12 @@ def draw_menu():
     print(f"     {_DIM}Cycle detection on the negative Collatz variant.{_RST}")
     print(f"  {_PINK_SOFT}4{_RST}. Graph / visualize sequence")
     print(f"     {_DIM}Plot the full Collatz trajectory for any number.{_RST}")
+    print(f"  {_PINK_SOFT}5{_RST}. Generate random number")
+    print(f"     {_DIM}Generate a random integer with a given number of digits and parity.{_RST}")
     print(f"  {_PINK_SOFT}c{_RST}. Reset all logs")
     print(f"     {_DIM}Deletes every log file and recreates the folders.{_RST}")
+    print(f"  {_PINK_SOFT}s{_RST}. Settings")
+    print(f"     {_DIM}Toggle verbosity, logging, notifications, and AI options.{_RST}")
     print(f"  {_PINK_SOFT}credits{_RST}. Show credits")
     print()
     print(f"  {_DIM}q{_RST}. Exit")
@@ -2054,9 +2129,52 @@ def draw_menu():
     print(f"{_BLACK_BG}{_BOLD}{_PINK_DARK}{'═' * width}{_RST}")
     print()
 
+def settings_menu():
+    while True:
+        clear_screen()
+        width = _box_width(50, 90)
+        print(f"\n{_BOLD}{_PINK_DARK}{'═'*width}{_RST}")
+        print(f"{_BOLD}{_PINK_SOFT}SETTINGS{_RST}")
+        print(f"{_BOLD}{_PINK_DARK}{'═'*width}{_RST}\n")
+        for key in sorted(settings.keys()):
+            val = settings[key]
+            status = f"{Fore.GREEN}ON{_RST}" if val else f"{Fore.RED}OFF{_RST}"
+            print(f"  {_PINK_SOFT}{key.replace('_',' ').title():<24}{_RST} : {status}")
+        print()
+        print(f"  {_PINK_SOFT}1{_RST}. Toggle verbose_console")
+        print(f"  {_PINK_SOFT}2{_RST}. Toggle enable_debug_log")
+        print(f"  {_PINK_SOFT}3{_RST}. Toggle enable_notifications")
+        print(f"  {_PINK_SOFT}4{_RST}. Toggle learn_from_results")
+        print(f"  {_PINK_SOFT}5{_RST}. Toggle show_ai_predictions")
+        print(f"  {_PINK_SOFT}6{_RST}. Toggle auto_graph_open")
+        print(f"  {_PINK_SOFT}0{_RST}. Back to main menu")
+        print()
+        try:
+            choice = input(f"{_BOLD}{_PINK_SOFT}▶ Choice: {_RST}").strip()
+        except KeyboardInterrupt:
+            return
+        if choice == '1':
+            settings["verbose_console"] = not settings["verbose_console"]
+        elif choice == '2':
+            settings["enable_debug_log"] = not settings["enable_debug_log"]
+        elif choice == '3':
+            settings["enable_notifications"] = not settings["enable_notifications"]
+        elif choice == '4':
+            settings["learn_from_results"] = not settings["learn_from_results"]
+        elif choice == '5':
+            settings["show_ai_predictions"] = not settings["show_ai_predictions"]
+        elif choice == '6':
+            settings["auto_graph_open"] = not settings["auto_graph_open"]
+        elif choice == '0':
+            break
+        else:
+            log("ERROR", "Invalid choice", Fore.RED)
+            time.sleep(1)
+
 # ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 def main():
+    atexit.register(lambda: collatz_ai.save_to_file() if settings.get("save_ai_on_exit", True) else None)
     while True:
         draw_menu()
         try:
@@ -2086,6 +2204,10 @@ def main():
             clear_screen()
             graph_mode()
             wait_for_enter()
+        elif c == "5":
+            clear_screen()
+            random_mode()
+            wait_for_enter()
         elif c == "c":
             clear_screen()
             confirm = input(f"{Fore.YELLOW}Are you sure you want to delete all log files? (y/n): {Style.RESET_ALL}").strip().lower()
@@ -2094,6 +2216,8 @@ def main():
             else:
                 log("INFO", "Log reset cancelled.", Fore.CYAN)
             wait_for_enter()
+        elif c == "s":
+            settings_menu()
         elif c == "credits":
             show_credits()
         else:
